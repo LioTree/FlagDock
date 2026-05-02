@@ -16,6 +16,22 @@ Install dependencies:
 npm install
 ```
 
+## Docker Setup
+
+Build the sandbox base image first (includes a full CTF toolchain — this takes a while, but only needs to be done once):
+
+```bash
+docker build -f sandbox/Dockerfile.sandbox -t flagdock-sandbox-base:latest .
+```
+
+Then build the workspace image:
+
+```bash
+docker build -t flagdock-workspace .
+```
+
+The workspace image is the one FlagDock launches per challenge.
+
 ## Configuration
 
 Copy the workspace config example:
