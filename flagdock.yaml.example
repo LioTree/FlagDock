@@ -1,0 +1,9 @@
+# Host interface used for Docker-published OpenCode ports.
+# Keep 127.0.0.1 when accessing the server through SSH port forwarding.
+workspace:
+  bindHost: 0.0.0.0
+
+# Host/IP printed by `flagdock attach`.
+# Set this to your server IP or DNS name when opening URLs from another machine.
+attach:
+  host: 192.168.0.214

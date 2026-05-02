@@ -1,0 +1,7 @@
+.flagdock
+.git
+node_modules
+challenges
+package-lock.json
+npm-debug.log*
+

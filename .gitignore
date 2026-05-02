@@ -1,0 +1,7 @@
+.flagdock/
+.local/
+challenges/
+node_modules/
+npm-debug.log*
+.codex
+flagdock.yaml
