@@ -25,4 +25,3 @@ export const BASE_IMAGE = "flagdock-sandbox-base:latest";
 export const WORK_IMAGE = "flagdock-opencode:latest";
 export const OPENCODE_PORT = 4096;
 export const DEFAULT_MANAGER_HOST = "127.0.0.1";
-export const DEFAULT_AUTO_INTERVAL_MS = Number.parseInt(process.env.FLAGDOCK_AUTO_INTERVAL_MS ?? "120000", 10);

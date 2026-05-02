@@ -3,7 +3,6 @@ import { URL } from "node:url";
 import {
   AGENT_NAME,
   CONTAINER_CHALLENGE_DIR,
-  DEFAULT_AUTO_INTERVAL_MS,
   DEFAULT_MANAGER_HOST,
   LOG_PATH,
 } from "./constants.js";
@@ -26,6 +25,7 @@ import { appendText, attachDirectorySegment, nowIso, sleep } from "./util.js";
 
 const DEFAULT_MODE = "auto";
 const VALID_MODES = new Set(["auto", "manual"]);
+const AUTO_ERROR_BACKOFF_MS = [15000, 30000, 60000, 120000, 300000];
 
 function validateMode(mode, fallback = DEFAULT_MODE) {
   const selected = mode ?? fallback;
@@ -68,13 +68,23 @@ function messageErrorSummary(message) {
   return `${name}: ${detail}`;
 }
 
+function errorSummary(error) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  return JSON.stringify(error) ?? String(error);
+}
+
 export class FlagDockManager {
   constructor() {
     this.state = null;
     this.startedAt = nowIso();
     this.server = null;
     this.runtimes = new Map();
-    this.activeTurns = new Map();
+    this.activeAutoLoops = new Map();
     this.tickTimer = null;
     this.stopping = false;
   }
@@ -594,52 +604,98 @@ export class FlagDockManager {
     return "continue";
   }
 
-  async driveSession(challenge, sessionID, kind = "continue") {
-    const key = `${challenge}:${sessionID}`;
-    if (this.activeTurns.has(key) || this.stopping) {
-      return;
+  updateSessionRegistry(workspace, sessionID, values) {
+    const registry = workspace.sessions[sessionID];
+    if (!registry) {
+      return null;
     }
-    const task = this.runSessionTurn(challenge, sessionID, kind)
-      .catch((error) => this.log(`session ${sessionID} ${kind} failed: ${error.message}`))
-      .finally(() => this.activeTurns.delete(key));
-    this.activeTurns.set(key, task);
+    Object.assign(registry, values);
+    return registry;
   }
 
-  async runSessionTurn(challenge, sessionID, kind) {
-    const workspace = this.state.workspaces[challenge];
-    if (!workspace || workspace.status !== "running") {
+  async driveSession(challenge, sessionID, kind = "continue") {
+    const key = `${challenge}:${sessionID}`;
+    if (this.activeAutoLoops.has(key) || this.stopping) {
       return;
     }
-    const registry = workspace.sessions[sessionID];
-    if (!registry || registry.mode !== "auto") {
-      return;
-    }
-    if (registry.status === "active") {
-      return;
-    }
+    const task = this.runAutoSessionLoop(challenge, sessionID, kind)
+      .catch((error) => this.log(`session ${sessionID} auto loop failed: ${error.message}`))
+      .finally(() => this.activeAutoLoops.delete(key));
+    this.activeAutoLoops.set(key, task);
+  }
+
+  async sendAutoPromptTurn(workspace, sessionID, kind) {
     const runtime = await this.getRuntime(workspace);
-    const model = await runtime.resolveModel(AGENT_NAME);
-    registry.last_auto_prompt_at = nowIso();
-    registry.last_auto_prompt_kind = kind;
-    registry.status = "active";
-    if (kind === "writeup") {
-      registry.writeup_prompt_sent_at = registry.writeup_prompt_sent_at ?? nowIso();
-    }
-    await this.save();
-    await this.log(`sending ${kind} prompt to ${challenge}/${sessionID}`);
-    const prompt = await readSessionPrompt(this.promptKind(kind));
-    const response = await runtime.client.session.promptAsync({
-      sessionID,
-      directory: CONTAINER_CHALLENGE_DIR,
-      agent: AGENT_NAME,
-      model,
-      parts: [{ type: "text", text: prompt }],
+    const session = await runtime.openSession(sessionID, { agent: AGENT_NAME });
+    const promptKind = this.promptKind(kind);
+    const prompt = await readSessionPrompt(promptKind);
+    const current = workspace.sessions[sessionID];
+    this.updateSessionRegistry(workspace, sessionID, {
+      last_auto_prompt_at: nowIso(),
+      last_auto_prompt_kind: promptKind,
+      status: "active",
+      ...(promptKind === "writeup" ? { writeup_prompt_sent_at: current?.writeup_prompt_sent_at ?? nowIso() } : {}),
     });
-    if (response.error) {
-      throw new Error(`session.promptAsync failed: ${JSON.stringify(response.error)}`);
+    await this.save();
+    await this.log(`sending ${promptKind} prompt to ${workspace.challenge}/${sessionID}`);
+    const result = await session.runAgent(prompt, { agent: AGENT_NAME });
+    if (result?.error) {
+      throw new Error(`agent turn failed: ${errorSummary(result.error)}`);
     }
-    registry.last_response_at = nowIso();
-    await this.syncSessions(workspace);
+    const solved = (await getChallengeInfo(workspace.challenge)).solved;
+    this.updateSessionRegistry(workspace, sessionID, {
+      last_response_at: nowIso(),
+      last_error: "",
+      status: solved ? "completed" : "idle",
+    });
+    await this.save();
+    await this.syncSessions(workspace).catch((error) => this.log(`sync ${workspace.challenge} after ${promptKind} failed: ${error.message}`));
+  }
+
+  async runAutoSessionLoop(challenge, sessionID, initialKind) {
+    let kind = this.promptKind(initialKind);
+    let failures = 0;
+    while (!this.stopping) {
+      const workspace = this.state.workspaces[challenge];
+      if (!workspace || workspace.status !== "running") {
+        return;
+      }
+      const registry = workspace.sessions[sessionID];
+      if (!registry || registry.mode !== "auto") {
+        return;
+      }
+      if (registry.status === "active") {
+        return;
+      }
+
+      const info = await getChallengeInfo(challenge);
+      if (info.solved && registry.writeup_prompt_sent_at) {
+        return;
+      }
+      if (info.solved) {
+        kind = "writeup";
+      }
+
+      try {
+        await this.sendAutoPromptTurn(workspace, sessionID, kind);
+        failures = 0;
+        if (kind === "writeup") {
+          return;
+        }
+        kind = (await getChallengeInfo(challenge)).solved ? "writeup" : "continue";
+      } catch (error) {
+        const message = errorSummary(error);
+        this.updateSessionRegistry(workspace, sessionID, {
+          last_error: message,
+          status: "unknown",
+        });
+        await this.save();
+        await this.log(`session ${sessionID} ${kind} failed: ${message}`);
+        const delay = AUTO_ERROR_BACKOFF_MS[Math.min(failures, AUTO_ERROR_BACKOFF_MS.length - 1)];
+        failures += 1;
+        await sleep(delay);
+      }
+    }
   }
 
   async tick() {
@@ -667,13 +723,8 @@ export class FlagDockManager {
       }
       return;
     }
-    const now = Date.now();
     for (const session of sessions) {
       if (session.mode !== "auto" || session.status === "active") {
-        continue;
-      }
-      const last = session.last_auto_prompt_at ? Date.parse(session.last_auto_prompt_at) : 0;
-      if (last && now - last < DEFAULT_AUTO_INTERVAL_MS) {
         continue;
       }
       const kind = session.last_auto_prompt_at ? "continue" : "initial";

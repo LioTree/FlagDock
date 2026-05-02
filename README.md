@@ -75,9 +75,7 @@ challenges/<name>/
   distfiles/
 ```
 
-`flag.txt` is treated as the solve marker. If `flag.txt` exists and is non-empty, auto start is skipped for that challenge.
-
-`challenges/` is ignored by git.
+`flag.txt` is treated as the solve marker. If `flag.txt` exists and is non-empty, `challenge start --mode auto` skips workspace creation (use `--mode manual` to inspect solved challenges).
 
 ## CLI
 
@@ -127,6 +125,17 @@ node bin/flagdock.js workspace rm <challenge>
 node bin/flagdock.js workspace stop-all
 node bin/flagdock.js workspace rm-all
 ```
+
+## Modes
+
+The `--mode` flag (default: `auto`) controls how the AI agent operates:
+
+| Mode | Behavior |
+|------|----------|
+| `auto` | The agent works autonomously. On start, it immediately receives the `initial` prompt. When each model turn stops, FlagDock checks for `flag.txt`; if the flag is still missing, it immediately sends a `continue` prompt. Once solved, it auto-generates a writeup. |
+| `manual` | No automatic prompts are sent. You drive the agent yourself through the OpenCode web UI. Use this mode to inspect already-solved challenges (auto mode skips solved ones). |
+
+Use `manual` mode when you want full control or need to poke at a finished challenge.
 
 ## Check
 
