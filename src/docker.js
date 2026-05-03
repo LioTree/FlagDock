@@ -1,21 +1,32 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
-  AGENT_DIR,
+  BACKENDS,
   BASE_IMAGE,
+  CODEX_CONFIG_FILE,
+  RUNTIME_AGENT_DIR,
+  RUNTIME_CODEX_AGENTS_FILE,
+  CODEX_IMAGE,
+  CODEX_PORT,
+  CONTAINER_CHALLENGE_DIR,
   LEGACY_OPENCODE_CONFIG_FILE,
   OPENCODE_AUTH_FILE,
   OPENCODE_CONFIG_FILE,
   OPENCODE_PORT,
   ROOT_DIR,
+  SOLUTION_FLAG_FILE,
+  SOLUTION_WRITEUP_FILE,
+  WORKSPACES_DIR,
   WORK_IMAGE,
+  CODEX_ENV_FILE,
 } from "./constants.js";
-import { pathExists, slugify } from "./util.js";
+import { ensureDir, pathExists, slugify } from "./util.js";
 
 const execFileAsync = promisify(execFile);
 
-async function runDocker(args, options = {}) {
+export async function runDocker(args, options = {}) {
   try {
     const result = await execFileAsync("docker", args, {
       cwd: ROOT_DIR,
@@ -37,6 +48,25 @@ export function workspaceContainerName(challenge) {
   return `flagdock-${slugify(challenge)}`;
 }
 
+export function backendContainerName(challenge, backend) {
+  if (backend === "codex") {
+    return `${workspaceContainerName(challenge)}-codex`;
+  }
+  return workspaceContainerName(challenge);
+}
+
+export function backendWorkspaceRoot(challenge, backend) {
+  return path.join(WORKSPACES_DIR, slugify(challenge), backend);
+}
+
+export function backendChallengeDir(challenge, backend) {
+  return path.join(backendWorkspaceRoot(challenge, backend), "challenge");
+}
+
+export async function removeBackendWorkspaceDir(challenge, backend) {
+  await fs.rm(backendWorkspaceRoot(challenge, backend), { recursive: true, force: true });
+}
+
 export async function dockerAvailable() {
   try {
     await runDocker(["version", "--format", "{{.Server.Version}}"]);
@@ -55,14 +85,19 @@ export async function imageExists(image) {
   }
 }
 
-export async function ensureImages(log = () => {}) {
+export async function ensureImages(backends, log = () => {}) {
+  const selected = new Set(Array.isArray(backends) ? backends : [backends]);
   if (!await imageExists(BASE_IMAGE)) {
     log(`building ${BASE_IMAGE} from sandbox/Dockerfile.sandbox`);
     await runDocker(["build", "-f", "sandbox/Dockerfile.sandbox", "-t", BASE_IMAGE, "."]);
   }
-  if (!await imageExists(WORK_IMAGE)) {
+  if (selected.has("opencode") && !await imageExists(WORK_IMAGE)) {
     log(`building ${WORK_IMAGE} from Dockerfile`);
     await runDocker(["build", "-f", "Dockerfile", "--build-arg", `BASE_IMAGE=${BASE_IMAGE}`, "-t", WORK_IMAGE, "."]);
+  }
+  if (selected.has("codex") && !await imageExists(CODEX_IMAGE)) {
+    log(`building ${CODEX_IMAGE} from Dockerfile.codex`);
+    await runDocker(["build", "-f", "Dockerfile.codex", "--build-arg", `BASE_IMAGE=${BASE_IMAGE}`, "-t", CODEX_IMAGE, "."]);
   }
 }
 
@@ -86,10 +121,15 @@ export function containerStatus(inspect) {
   return containerRunning(inspect) ? "running" : "stopped";
 }
 
-export function containerHostPort(inspect) {
-  const bindings = inspect?.NetworkSettings?.Ports?.[`${OPENCODE_PORT}/tcp`];
+export function containerHostPort(inspect, containerPort = OPENCODE_PORT) {
+  const bindings = inspect?.NetworkSettings?.Ports?.[`${containerPort}/tcp`];
   const first = Array.isArray(bindings) ? bindings[0] : null;
   return first?.HostPort ? Number.parseInt(first.HostPort, 10) : null;
+}
+
+function containerMountSource(inspect, destination) {
+  const mount = inspect?.Mounts?.find((item) => item.Destination === destination);
+  return mount?.Source ? path.resolve(mount.Source) : null;
 }
 
 async function firstExistingPath(paths) {
@@ -101,16 +141,66 @@ async function firstExistingPath(paths) {
   return null;
 }
 
+function shouldCopyChallengeEntry(challengeDir, source) {
+  const relative = path.relative(challengeDir, source);
+  if (!relative) {
+    return true;
+  }
+  if (relative === SOLUTION_FLAG_FILE || relative === SOLUTION_WRITEUP_FILE) {
+    return false;
+  }
+  const [topLevel] = relative.split(path.sep);
+  if (BACKENDS.some((backend) => topLevel === `${backend}_solution`)) {
+    return false;
+  }
+  return true;
+}
+
+async function ensureBackendChallengeCopy(challenge, challengeDir, backend) {
+  const target = backendChallengeDir(challenge, backend);
+  if (await pathExists(target)) {
+    return target;
+  }
+  await fs.rm(target, { recursive: true, force: true });
+  await ensureDir(path.dirname(target));
+  await fs.cp(challengeDir, target, {
+    recursive: true,
+    filter: (source) => shouldCopyChallengeEntry(challengeDir, source),
+  });
+  return target;
+}
+
+async function ensureExpectedMounts(inspected, name, expectedMounts, log = () => {}) {
+  if (!inspected) {
+    return null;
+  }
+  for (const mount of expectedMounts) {
+    const mountedSource = containerMountSource(inspected, mount.destination);
+    if (mountedSource === path.resolve(mount.source)) {
+      continue;
+    }
+    log(`recreating container ${name} to refresh ${mount.destination} mount`);
+    await runDocker(["rm", "-f", name]);
+    return null;
+  }
+  return inspected;
+}
+
 export async function startWorkspaceContainer({ bindHost, challenge, challengeDir, log = () => {} }) {
-  const name = workspaceContainerName(challenge);
+  const name = backendContainerName(challenge, "opencode");
+  const runtimeChallengeDir = await ensureBackendChallengeCopy(challenge, challengeDir, "opencode");
   let inspected = await inspectContainer(name);
+  inspected = await ensureExpectedMounts(inspected, name, [
+    { destination: CONTAINER_CHALLENGE_DIR, source: runtimeChallengeDir },
+    { destination: "/root/.opencode/agent", source: RUNTIME_AGENT_DIR },
+  ], log);
   if (inspected && !containerRunning(inspected)) {
     log(`starting existing container ${name}`);
     await runDocker(["start", name]);
     inspected = await inspectContainer(name);
   }
   if (!inspected) {
-    const agentDir = path.resolve(AGENT_DIR);
+    const agentDir = path.resolve(RUNTIME_AGENT_DIR);
     const args = [
       "run",
       "-d",
@@ -125,7 +215,7 @@ export async function startWorkspaceContainer({ bindHost, challenge, challengeDi
       "-p",
       `${bindHost}::${OPENCODE_PORT}`,
       "-v",
-      `${path.resolve(challengeDir)}:/challenge`,
+      `${path.resolve(runtimeChallengeDir)}:${CONTAINER_CHALLENGE_DIR}`,
       "-v",
       `${agentDir}:/root/.opencode/agent:ro`,
     ];
@@ -147,19 +237,85 @@ export async function startWorkspaceContainer({ bindHost, challenge, challengeDi
     await runDocker(args);
     inspected = await inspectContainer(name);
   }
-  const port = containerHostPort(inspected);
+  const port = containerHostPort(inspected, OPENCODE_PORT);
   if (!port) {
     throw new Error(`Container ${name} has no published ${OPENCODE_PORT}/tcp port`);
   }
   return {
+    backend: "opencode",
+    challengeDir: runtimeChallengeDir,
     containerName: name,
     hostPort: port,
     status: "running",
   };
 }
 
-export async function stopWorkspaceContainer(challenge) {
-  const name = workspaceContainerName(challenge);
+export async function startCodexWorkspaceContainer({ bindHost, challenge, challengeDir, log = () => {} }) {
+  const name = backendContainerName(challenge, "codex");
+  const runtimeChallengeDir = await ensureBackendChallengeCopy(challenge, challengeDir, "codex");
+  let inspected = await inspectContainer(name);
+  inspected = await ensureExpectedMounts(inspected, name, [
+    { destination: CONTAINER_CHALLENGE_DIR, source: runtimeChallengeDir },
+    { destination: `${CONTAINER_CHALLENGE_DIR}/AGENTS.md`, source: RUNTIME_CODEX_AGENTS_FILE },
+  ], log);
+  if (inspected && !containerRunning(inspected)) {
+    log(`starting existing container ${name}`);
+    await runDocker(["start", name]);
+    inspected = await inspectContainer(name);
+  }
+  if (!inspected) {
+    if (!await pathExists(CODEX_CONFIG_FILE)) {
+      throw new Error(`Missing Codex config file: ${CODEX_CONFIG_FILE}`);
+    }
+    if (!await pathExists(CODEX_ENV_FILE)) {
+      throw new Error(`Missing Codex env file: ${CODEX_ENV_FILE}`);
+    }
+    const codexHomeDir = path.join(backendWorkspaceRoot(challenge, "codex"), "codex-home");
+    await ensureDir(codexHomeDir);
+    const args = [
+      "run",
+      "-d",
+      "--name",
+      name,
+      "--privileged",
+      "--cap-add=SYS_PTRACE",
+      "--security-opt",
+      "seccomp=unconfined",
+      "--add-host",
+      "host.docker.internal:host-gateway",
+      "-p",
+      `${bindHost}::${CODEX_PORT}`,
+      "--env-file",
+      path.resolve(CODEX_ENV_FILE),
+      "-v",
+      `${path.resolve(runtimeChallengeDir)}:${CONTAINER_CHALLENGE_DIR}`,
+      "-v",
+      `${path.resolve(RUNTIME_CODEX_AGENTS_FILE)}:${CONTAINER_CHALLENGE_DIR}/AGENTS.md:ro`,
+      "-v",
+      `${path.resolve(codexHomeDir)}:/root/.codex`,
+      "-v",
+      `${path.resolve(CODEX_CONFIG_FILE)}:/root/.codex/config.toml:ro`,
+      CODEX_IMAGE,
+    ];
+    log(`creating container ${name}`);
+    await runDocker(args);
+    inspected = await inspectContainer(name);
+  }
+  const port = containerHostPort(inspected, CODEX_PORT);
+  if (!port) {
+    throw new Error(`Container ${name} has no published ${CODEX_PORT}/tcp port`);
+  }
+  return {
+    backend: "codex",
+    challengeDir: runtimeChallengeDir,
+    containerName: name,
+    hostPort: port,
+    status: "running",
+  };
+}
+
+export async function stopWorkspaceContainer(challenge, backend = "opencode") {
+  const name = backendContainerName(challenge, backend);
   const inspected = await inspectContainer(name);
   if (!inspected) {
     return false;
@@ -170,8 +326,8 @@ export async function stopWorkspaceContainer(challenge) {
   return true;
 }
 
-export async function removeWorkspaceContainer(challenge) {
-  const name = workspaceContainerName(challenge);
+export async function removeWorkspaceContainer(challenge, backend = "opencode") {
+  const name = backendContainerName(challenge, backend);
   const inspected = await inspectContainer(name);
   if (!inspected) {
     return false;

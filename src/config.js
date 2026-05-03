@@ -3,6 +3,7 @@ import { parse } from "yaml";
 import { FLAGDOCK_CONFIG_FILE } from "./constants.js";
 
 const DEFAULT_BIND_HOST = "127.0.0.1";
+const VALID_BACKEND_MODES = new Set(["opencode", "codex", "race"]);
 
 function readString(value, fallback) {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
@@ -13,6 +14,14 @@ function rejectUrlLikeHost(name, value) {
     throw new Error(`${name} must be a host or IP address, not a URL`);
   }
   return value;
+}
+
+function readBackendMode(value) {
+  const mode = typeof value === "string" && value.trim() ? value.trim() : "opencode";
+  if (!VALID_BACKEND_MODES.has(mode)) {
+    throw new Error(`backend.mode must be one of: ${[...VALID_BACKEND_MODES].join(", ")}`);
+  }
+  return mode;
 }
 
 export async function loadFlagDockConfig() {
@@ -28,8 +37,10 @@ export async function loadFlagDockConfig() {
 
   const workspace = parsed.workspace && typeof parsed.workspace === "object" ? parsed.workspace : {};
   const attach = parsed.attach && typeof parsed.attach === "object" ? parsed.attach : {};
+  const backend = parsed.backend && typeof parsed.backend === "object" ? parsed.backend : {};
   const bindHost = rejectUrlLikeHost("workspace.bindHost", readString(workspace.bindHost, DEFAULT_BIND_HOST));
   const attachHost = rejectUrlLikeHost("attach.host", readString(attach.host, bindHost));
+  const backendMode = readBackendMode(backend.mode);
 
   return {
     workspace: {
@@ -37,6 +48,9 @@ export async function loadFlagDockConfig() {
     },
     attach: {
       host: attachHost,
+    },
+    backend: {
+      mode: backendMode,
     },
   };
 }

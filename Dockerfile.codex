@@ -1,0 +1,24 @@
+ARG BASE_IMAGE=flagdock-sandbox-base:latest
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TERM=xterm
+ENV CODEX_HOME=/root/.codex
+
+RUN apt-get update \
+    && apt-get install -y curl ca-certificates gnupg tmux bubblewrap \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+       > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y nodejs \
+    && npm install -g @openai/codex \
+    && mkdir -p /root/.codex /challenge \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /challenge
+EXPOSE 4097
+
+CMD ["codex", "app-server", "--listen", "ws://0.0.0.0:4097"]

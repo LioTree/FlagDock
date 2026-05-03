@@ -17,10 +17,10 @@ function usage() {
   flagdock status
   flagdock challenges
   flagdock challenge start <challenge> [--mode auto|manual]
-  flagdock sessions <challenge>
-  flagdock attach <challenge> [--session <session_id>]
-  flagdock session new <challenge> [--mode auto|manual]
-  flagdock mode set <challenge> --session <session_id> auto|manual
+  flagdock sessions <challenge> [--backend opencode|codex]
+  flagdock attach <challenge> [--backend opencode|codex] [--session <session_id>]
+  flagdock session new <challenge> [--backend opencode|codex] [--mode auto|manual]
+  flagdock mode set <challenge> [--backend opencode|codex] --session <session_id> auto|manual
   flagdock workspace stop <challenge>
   flagdock workspace rm <challenge>
   flagdock workspace stop-all
@@ -149,8 +149,11 @@ async function showStatus() {
   printTable(status.workspaces, [
     { header: "challenge", value: (row) => row.challenge },
     { header: "status", value: (row) => row.status },
+    { header: "backends", value: (row) => (row.backends ?? []).join(",") },
     { header: "sessions", value: (row) => row.sessions },
     { header: "primary", value: (row) => row.primary_session },
+    { header: "codex_primary", value: (row) => row.codex_primary_session },
+    { header: "solved_by", value: (row) => row.solved_by },
     { header: "server", value: (row) => row.server_url },
     { header: "attach", value: (row) => row.attach_server_url },
   ]);
@@ -168,8 +171,10 @@ async function showChallenges() {
   printTable(challenges, [
     { header: "challenge", value: (row) => row.challenge },
     { header: "status", value: (row) => row.status },
+    { header: "backends", value: (row) => row.backends ?? "" },
     { header: "sessions", value: (row) => row.sessions },
     { header: "primary", value: (row) => row.primary_session },
+    { header: "solved_by", value: (row) => row.solved_by ?? "" },
   ]);
 }
 
@@ -184,15 +189,29 @@ async function startChallenge(args) {
   const mode = parseOption(args, "--mode") ?? "auto";
   const result = await request("POST", "/challenge/start", { challenge, mode });
   if (result.skipped) {
-    console.log(`challenge ${result.challenge} already has flag.txt; auto start skipped`);
+    console.log(`challenge ${result.challenge} already has a backend solution; auto start skipped`);
     console.log("use --mode manual to start a workspace for inspection");
     return;
   }
-  console.log(`workspace: ${result.workspace.status} ${result.workspace.server_url}`);
+  console.log(`workspace: ${result.workspace.status} backends=${(result.workspace.backends ?? []).join(",")}`);
+  if (result.workspace.server_url) {
+    console.log(`opencode server: ${result.workspace.server_url}`);
+  }
+  if (result.workspace.codex_server_url) {
+    console.log(`codex server: ${result.workspace.codex_server_url}`);
+  }
   if (result.workspace.attach_server_url && result.workspace.attach_server_url !== result.workspace.server_url) {
     console.log(`attach base: ${result.workspace.attach_server_url}`);
   }
-  console.log(`primary session: ${result.primary_session.session_id} mode=${result.primary_session.mode}`);
+  if (result.primary_session) {
+    console.log(`primary session: ${result.primary_session.session_id} mode=${result.primary_session.mode}`);
+  }
+  if (result.opencode_primary_session && result.opencode_primary_session !== result.primary_session) {
+    console.log(`opencode session: ${result.opencode_primary_session.session_id} mode=${result.opencode_primary_session.mode}`);
+  }
+  if (result.codex_primary_session) {
+    console.log(`codex session: ${result.codex_primary_session.session_id} mode=${result.codex_primary_session.mode}`);
+  }
 }
 
 async function showSessions(args) {
@@ -200,9 +219,14 @@ async function showSessions(args) {
   if (!challenge) {
     throw new Error(usage());
   }
+  const backend = parseOption(args, "--backend");
   const query = new URLSearchParams({ challenge });
+  if (backend) {
+    query.set("backend", backend);
+  }
   const { sessions } = await request("GET", `/sessions?${query}`);
   printTable(sessions, [
+    { header: "backend", value: (row) => row.backend ?? "opencode" },
     { header: "session", value: (row) => row.session_id },
     { header: "role", value: (row) => row.role },
     { header: "source", value: (row) => row.source },
@@ -218,13 +242,17 @@ async function attach(args) {
   if (!challenge) {
     throw new Error(usage());
   }
+  const backend = parseOption(args, "--backend");
   const session = parseOption(args, "--session");
   const query = new URLSearchParams({ challenge });
+  if (backend) {
+    query.set("backend", backend);
+  }
   if (session) {
     query.set("session", session);
   }
   const result = await request("GET", `/attach?${query}`);
-  console.log(result.url);
+  console.log(result.command ?? result.url);
 }
 
 async function newSession(args) {
@@ -232,19 +260,21 @@ async function newSession(args) {
   if (!challenge) {
     throw new Error(usage());
   }
+  const backend = parseOption(args, "--backend");
   const mode = parseOption(args, "--mode") ?? "auto";
-  const { session } = await request("POST", "/session/new", { challenge, mode });
+  const { session } = await request("POST", "/session/new", { challenge, mode, backend });
   console.log(`${session.session_id} mode=${session.mode} url=${session.url}`);
 }
 
 async function setMode(args) {
   const challenge = args[0];
   const session = parseOption(args, "--session");
+  const backend = parseOption(args, "--backend") ?? "opencode";
   const mode = lastArg(args);
   if (!challenge || !session || !mode || mode === session) {
     throw new Error(usage());
   }
-  const result = await request("POST", "/mode/set", { challenge, session, mode });
+  const result = await request("POST", "/mode/set", { challenge, session, mode, backend });
   console.log(`${result.session.session_id} mode=${result.session.mode}`);
 }
 

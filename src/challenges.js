@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { CHALLENGES_DIR } from "./constants.js";
+import { BACKENDS, CHALLENGES_DIR, SOLUTION_FLAG_FILE, SOLUTION_WRITEUP_FILE } from "./constants.js";
 import { nonEmptyFile, pathExists } from "./util.js";
 
 export async function resolveChallengePath(challenge) {
@@ -18,16 +18,35 @@ export async function resolveChallengePath(challenge) {
 export async function getChallengeInfo(challenge) {
   const dir = await resolveChallengePath(challenge);
   const challengeMd = path.join(dir, "challenge.md");
-  const flagPath = path.join(dir, "flag.txt");
   const exists = await pathExists(dir);
   const valid = exists && await pathExists(challengeMd);
-  const solved = valid && await nonEmptyFile(flagPath);
+  const solutions = {};
+  const solvedBackends = [];
+  for (const backend of BACKENDS) {
+    const solutionDir = path.join(dir, `${backend}_solution`);
+    const flagPath = path.join(solutionDir, SOLUTION_FLAG_FILE);
+    const writeupPath = path.join(solutionDir, SOLUTION_WRITEUP_FILE);
+    const solved = valid && await nonEmptyFile(flagPath);
+    const hasWriteup = valid && await nonEmptyFile(writeupPath);
+    if (solved) {
+      solvedBackends.push(backend);
+    }
+    solutions[backend] = {
+      dir: solutionDir,
+      flagPath,
+      writeupPath,
+      solved,
+      hasWriteup,
+    };
+  }
+  const solved = solvedBackends.length > 0;
   return {
     name: challenge,
     dir,
-    flagPath,
     valid,
     solved,
+    solvedBackends,
+    solutions,
     baseStatus: valid ? (solved ? "solved" : "available") : "invalid",
   };
 }
@@ -50,18 +69,22 @@ export async function scanChallenges(workspaces = {}) {
     const info = await getChallengeInfo(entry.name);
     const workspace = workspaces[entry.name];
     let status = info.baseStatus;
-    if (!info.solved && info.valid && workspace?.status === "running") {
+    const backendStates = Object.values(workspace?.backends ?? {});
+    const hasRunning = backendStates.some((backend) => backend.status === "running");
+    const hasStopped = backendStates.some((backend) => backend.status === "stopped");
+    if (!info.solved && info.valid && hasRunning) {
       status = "running";
-    } else if (!info.solved && info.valid && workspace?.status === "stopped") {
+    } else if (!info.solved && info.valid && hasStopped) {
       status = "stopped";
     }
     result.push({
       challenge: info.name,
       status,
       path: info.dir,
-      sessions: Object.keys(workspace?.sessions ?? {}).length,
-      primary_session: workspace?.primarySessionId ?? "",
-      server_url: workspace?.serverUrl ?? "",
+      sessions: backendStates.reduce((sum, backend) => sum + Object.keys(backend.sessions ?? {}).length, 0),
+      primary_session: workspace?.backends?.opencode?.primarySessionId ?? "",
+      solved_by: workspace?.solvedBy ?? info.solvedBackends[0] ?? "",
+      backends: BACKENDS.filter((backend) => workspace?.backends?.[backend]).join(","),
     });
   }
   return result.sort((a, b) => a.challenge.localeCompare(b.challenge));

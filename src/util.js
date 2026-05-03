@@ -27,7 +27,7 @@ export async function readJson(filePath, fallback) {
 
 export async function writeJson(filePath, value) {
   await ensureDir(path.dirname(filePath));
-  const tmp = `${filePath}.${process.pid}.tmp`;
+  const tmp = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
   await fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`);
   await fs.rename(tmp, filePath);
 }
