@@ -92,8 +92,8 @@ export async function ensureImages(backends, log = () => {}) {
     await runDocker(["build", "-f", "sandbox/Dockerfile.sandbox", "-t", BASE_IMAGE, "."]);
   }
   if (selected.has("opencode") && !await imageExists(WORK_IMAGE)) {
-    log(`building ${WORK_IMAGE} from Dockerfile`);
-    await runDocker(["build", "-f", "Dockerfile", "--build-arg", `BASE_IMAGE=${BASE_IMAGE}`, "-t", WORK_IMAGE, "."]);
+    log(`building ${WORK_IMAGE} from Dockerfile.opencode`);
+    await runDocker(["build", "-f", "Dockerfile.opencode", "--build-arg", `BASE_IMAGE=${BASE_IMAGE}`, "-t", WORK_IMAGE, "."]);
   }
   if (selected.has("codex") && !await imageExists(CODEX_IMAGE)) {
     log(`building ${CODEX_IMAGE} from Dockerfile.codex`);

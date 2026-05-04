@@ -24,13 +24,19 @@ Build the sandbox base image first (includes a full CTF toolchain — this takes
 docker build -f sandbox/Dockerfile.sandbox -t flagdock-sandbox-base:latest .
 ```
 
-Then build the workspace image:
+Then build the OpenCode workspace image:
 
 ```bash
-docker build -t flagdock-workspace .
+docker build -f Dockerfile.opencode -t flagdock-opencode:latest .
 ```
 
-The workspace image is the one FlagDock launches per challenge.
+Then build the Codex workspace image:
+
+```bash
+docker build -f Dockerfile.codex -t flagdock-codex:latest .
+```
+
+These are the images FlagDock launches per challenge.
 
 ## Configuration
 
