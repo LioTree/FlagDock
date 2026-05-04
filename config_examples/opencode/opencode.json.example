@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/gpt-5.1-codex",
+  "provider": {
+    "opencode": {
+      "models": {
+        "gpt-5.1-codex": {
+          "options": {
+            "reasoningEffort": "high",
+            "textVerbosity": "low",
+            "reasoningSummary": "auto"
+          }
+        }
+      }
+    }
+  }
+}

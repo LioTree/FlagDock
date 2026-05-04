@@ -38,17 +38,6 @@ permission:
   question: allow
 ---`;
 
-const OPENCODE_AGENT_NOTES = `OpenCode-specific notes:
-- The sandbox tool list is available at /tools.txt.
-- With named tools: call \`view_image\` FIRST.
-- For XSS/SSRF, use \`webhook_create\` or \`curl\` to webhook.site.
-- Verify every candidate with \`submit_flag\` before reporting.
-- Once correct, output \`FLAG: <value>\` on its own line.`;
-
-const CODEX_AGENT_NOTES = `Codex-specific notes:
-- The session prompt will tell you where to write the final flag; follow it exactly.
-- Prefer the tools available in this Codex runtime. If a helper from another environment is unavailable, use shell tooling instead.`;
-
 async function readPromptFile(file, label) {
   const prompt = await readText(file).catch((error) => {
     if (error?.code === "ENOENT") {
@@ -64,11 +53,11 @@ function joinSections(...sections) {
 }
 
 function renderOpenCodeAgentPrompt(body) {
-  return joinSections(OPENCODE_AGENT_FRONTMATTER, body, OPENCODE_AGENT_NOTES);
+  return joinSections(OPENCODE_AGENT_FRONTMATTER, body);
 }
 
 function renderCodexAgentsPrompt(body) {
-  return joinSections(body, CODEX_AGENT_NOTES);
+  return joinSections(body);
 }
 
 export async function ensureAgentRuntimeFiles() {

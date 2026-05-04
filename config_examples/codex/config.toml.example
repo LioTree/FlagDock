@@ -1,0 +1,10 @@
+# Minimal Codex config for FlagDock.
+# The API key is provided separately through .local/codex/env.
+
+model = "gpt-5.1-codex-max"
+model_provider = "openai"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[history]
+persistence = "save-all"
