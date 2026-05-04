@@ -254,15 +254,26 @@ export class CodexAppClient extends EventEmitter {
     return response.thread;
   }
 
-  async runTurn(threadID, prompt) {
+  async startTurn(threadID, prompt) {
     const response = await this.request("turn/start", {
       threadId: threadID,
       input: [codexTextInput(prompt)],
       cwd: CONTAINER_CHALLENGE_DIR,
       approvalPolicy: "never",
     });
-    const turnID = response.turn.id;
-    return this.waitForTurn(threadID, turnID);
+    return response.turn;
+  }
+
+  async interruptTurn(threadID, turnID) {
+    await this.request("turn/interrupt", {
+      threadId: threadID,
+      turnId: turnID,
+    });
+  }
+
+  async runTurn(threadID, prompt) {
+    const turn = await this.startTurn(threadID, prompt);
+    return this.waitForTurn(threadID, turn.id);
   }
 
   async readTurn(threadID, turnID) {
@@ -313,7 +324,7 @@ export class CodexAppClient extends EventEmitter {
             finish(() => reject(new Error(stringifyError(turn.error))));
             return;
           }
-          if (turnHasFinalAnswer(turn) || turn?.status === "completed") {
+          if (turnHasFinalAnswer(turn) || turn?.status === "completed" || turn?.status === "interrupted") {
             finish(() => resolve(turn));
             return;
           }

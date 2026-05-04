@@ -593,6 +593,107 @@ export class FlagDockManager {
     return { flag: copiedFlag, writeup: copiedWriteup };
   }
 
+  sessionEntries(workspace) {
+    return Object.entries(workspace.backends ?? {}).flatMap(([backend, backendState]) =>
+      Object.values(backendState.sessions ?? {}).map((session) => ({ backend, session })),
+    );
+  }
+
+  clearSolveBroadcastState(workspace) {
+    let changed = false;
+    if (workspace.solve_event_dispatched_at) {
+      delete workspace.solve_event_dispatched_at;
+      changed = true;
+    }
+    for (const { session } of this.sessionEntries(workspace)) {
+      if (session.writeup_prompt_sent_at) {
+        delete session.writeup_prompt_sent_at;
+        changed = true;
+      }
+    }
+    if (changed) {
+      workspace.updatedAt = nowIso();
+    }
+    return changed;
+  }
+
+  async interruptOpenCodeSession(workspace, sessionID) {
+    const backendState = this.backendState(workspace, "opencode");
+    if (!backendState) {
+      return false;
+    }
+    const runtime = await this.getRuntime(backendState);
+    const session = await runtime.openSession(sessionID, defaultSessionOptions());
+    await session.interrupt();
+    return true;
+  }
+
+  async activeCodexTurnID(workspace, session) {
+    if (session.active_turn_id) {
+      return session.active_turn_id;
+    }
+    const backendState = this.backendState(workspace, "codex");
+    if (!backendState) {
+      return null;
+    }
+    const client = await this.getCodexClient(backendState);
+    const thread = await client.readThread(session.thread_id);
+    const activeTurn = [...(thread?.turns ?? [])].reverse().find((turn) => turn?.status === "inProgress" || turn?.status === "active");
+    if (!activeTurn?.id) {
+      return null;
+    }
+    session.active_turn_id = activeTurn.id;
+    return activeTurn.id;
+  }
+
+  async interruptCodexSession(workspace, session) {
+    const backendState = this.backendState(workspace, "codex");
+    if (!backendState) {
+      return false;
+    }
+    const turnID = await this.activeCodexTurnID(workspace, session);
+    if (!turnID) {
+      return false;
+    }
+    const client = await this.getCodexClient(backendState);
+    await client.interruptTurn(session.thread_id, turnID);
+    return true;
+  }
+
+  async interruptAutoSession(workspace, backend, session) {
+    if (backend === "codex") {
+      return this.interruptCodexSession(workspace, session);
+    }
+    return this.interruptOpenCodeSession(workspace, session.session_id);
+  }
+
+  async dispatchSolvedWorkspace(workspace) {
+    if (workspace.solve_event_dispatched_at) {
+      return false;
+    }
+    const activeSessions = this.sessionEntries(workspace)
+      .filter(({ session }) => session.mode === "auto"
+        && session.status === "active"
+        && !session.writeup_prompt_sent_at
+        && session.last_auto_prompt_kind !== "writeup");
+    workspace.solve_event_dispatched_at = nowIso();
+    workspace.updatedAt = nowIso();
+    await this.save();
+    if (activeSessions.length === 0) {
+      await this.log(`workspace ${workspace.challenge} solved; no active auto sessions to interrupt`);
+      return true;
+    }
+    await this.log(`workspace ${workspace.challenge} solved; interrupting ${activeSessions.length} active auto session(s)`);
+    const results = await Promise.allSettled(activeSessions.map(({ backend, session }) => this.interruptAutoSession(workspace, backend, session)));
+    for (const [index, result] of results.entries()) {
+      if (result.status === "rejected") {
+        const { backend, session } = activeSessions[index];
+        await this.log(`interrupt ${backend}/${session.session_id} failed: ${errorSummary(result.reason)}`);
+      }
+    }
+    return true;
+  }
+
   async syncOpenCodeSessions(workspace) {
     const backendState = this.backendState(workspace, "opencode");
     if (!backendState) {
@@ -674,6 +775,9 @@ export class FlagDockManager {
         session.status = normalizeCodexThreadStatus(thread.status, solved);
         session.title = thread.name ?? thread.preview ?? session.title ?? "";
         session.last_seen_at = nowIso();
+        if (session.status !== "active") {
+          session.active_turn_id = "";
+        }
         session.last_error = "";
       } catch (error) {
         session.last_error = errorSummary(error);
@@ -738,6 +842,7 @@ export class FlagDockManager {
       last_auto_prompt_kind: existing.last_auto_prompt_kind,
       last_response_at: existing.last_response_at,
       writeup_prompt_sent_at: existing.writeup_prompt_sent_at,
+      active_turn_id: existing.active_turn_id,
       last_error: existing.last_error ?? "",
     };
     sessionCollection(backendState)[thread.id] = registry;
@@ -1120,7 +1225,12 @@ export class FlagDockManager {
     });
     await this.save();
     await this.log(`sending ${promptKind} prompt to codex ${workspace.challenge}/${sessionID}`);
-    const turn = await client.runTurn(session.thread_id, prompt);
+    const pendingTurn = await client.startTurn(session.thread_id, prompt);
+    this.updateSessionRegistry(workspace, "codex", sessionID, {
+      active_turn_id: pendingTurn.id,
+    });
+    await this.save();
+    const turn = await client.waitForTurn(session.thread_id, pendingTurn.id);
     if (turn.status === "failed") {
       throw new Error(`codex turn failed: ${errorSummary(turn.error)}`);
     }
@@ -1128,6 +1238,7 @@ export class FlagDockManager {
     const solved = (await getChallengeInfo(workspace.challenge)).solved;
     await this.reconcileSolvedBy(workspace);
     this.updateSessionRegistry(workspace, "codex", sessionID, {
+      active_turn_id: "",
       last_response_at: nowIso(),
       last_error: "",
       status: solved ? "completed" : "idle",
@@ -1162,14 +1273,15 @@ export class FlagDockManager {
 
       const info = await getChallengeInfo(challenge);
       await this.reconcileSolvedBy(workspace, info);
-      if (info.solved && workspace.solvedBy && workspace.solvedBy !== backend) {
-        return;
-      }
       if (info.solved && registry.writeup_prompt_sent_at) {
         return;
       }
       if (info.solved) {
-        kind = "writeup";
+        if (kind !== "writeup") {
+          return;
+        }
+      } else if (kind === "writeup") {
+        kind = "continue";
       }
 
       try {
@@ -1178,7 +1290,10 @@ export class FlagDockManager {
         if (kind === "writeup") {
           return;
         }
-        kind = (await getChallengeInfo(challenge)).solved ? "writeup" : "continue";
+        if ((await getChallengeInfo(challenge)).solved) {
+          return;
+        }
+        kind = "continue";
       } catch (error) {
         const message = errorSummary(error);
         this.updateSessionRegistry(workspace, backend, sessionID, {
@@ -1197,14 +1312,13 @@ export class FlagDockManager {
   async maybeDriveWorkspace(workspace) {
     const info = await getChallengeInfo(workspace.challenge);
     await this.reconcileSolvedBy(workspace, info);
-    const sessions = Object.entries(workspace.backends ?? {}).flatMap(([backend, backendState]) =>
-      Object.values(backendState.sessions ?? {}).map((session) => ({ backend, session })),
-    );
+    const sessions = this.sessionEntries(workspace);
+    if (!info.solved && this.clearSolveBroadcastState(workspace)) {
+      await this.save();
+    }
     if (info.solved) {
+      await this.dispatchSolvedWorkspace(workspace);
       for (const { backend, session } of sessions) {
-        if (workspace.solvedBy && workspace.solvedBy !== backend) {
-          continue;
-        }
         if (session.mode === "auto" && !session.writeup_prompt_sent_at && session.status !== "active") {
           this.driveSession(workspace.challenge, session.session_id, "writeup", backend);
         }
