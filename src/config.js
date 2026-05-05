@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
+import path from "node:path";
 import { parse } from "yaml";
-import { FLAGDOCK_CONFIG_FILE } from "./constants.js";
+import { CHALLENGES_DIR, FLAGDOCK_CONFIG_FILE, ROOT_DIR } from "./constants.js";
 
 const DEFAULT_BIND_HOST = "127.0.0.1";
 const VALID_BACKEND_MODES = new Set(["opencode", "codex", "race"]);
@@ -24,6 +25,14 @@ function readBackendMode(value) {
   return mode;
 }
 
+function readChallengesDir(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return CHALLENGES_DIR;
+  }
+  const dir = value.trim();
+  return path.isAbsolute(dir) ? path.resolve(dir) : path.resolve(ROOT_DIR, dir);
+}
+
 export async function loadFlagDockConfig() {
   let parsed = {};
   try {
@@ -39,12 +48,14 @@ export async function loadFlagDockConfig() {
   const attach = parsed.attach && typeof parsed.attach === "object" ? parsed.attach : {};
   const backend = parsed.backend && typeof parsed.backend === "object" ? parsed.backend : {};
   const bindHost = rejectUrlLikeHost("workspace.bindHost", readString(workspace.bindHost, DEFAULT_BIND_HOST));
+  const challengesDir = readChallengesDir(workspace.challengesDir);
   const attachHost = rejectUrlLikeHost("attach.host", readString(attach.host, bindHost));
   const backendMode = readBackendMode(backend.mode);
 
   return {
     workspace: {
       bindHost,
+      challengesDir,
     },
     attach: {
       host: attachHost,

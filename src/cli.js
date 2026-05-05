@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DAEMON_PATH, DEFAULT_MANAGER_HOST, ROOT_DIR, STATE_DIR } from "./constants.js";
 import { scanChallenges } from "./challenges.js";
+import { loadFlagDockConfig } from "./config.js";
 import { loadDaemonInfo, loadState } from "./state.js";
 import { ensureDir, formatTimestamp, sleep } from "./util.js";
 
@@ -166,7 +167,8 @@ async function showChallenges() {
     ({ challenges } = await request("GET", "/challenges"));
   } else {
     const state = await loadState();
-    challenges = await scanChallenges(state.workspaces);
+    const config = await loadFlagDockConfig();
+    challenges = await scanChallenges(config.workspace.challengesDir, state.workspaces);
   }
   printTable(challenges, [
     { header: "challenge", value: (row) => row.challenge },

@@ -2,7 +2,7 @@
 
 FlagDock is a local Docker-based workspace manager for solving CTF challenges with OpenCode and Codex.
 
-It scans `challenges/`, starts one workspace container per challenge/backend, and syncs final outputs back into the source challenge directory.
+It scans a configurable challenge root directory, starts one workspace container per challenge/backend, and syncs final outputs back into the source challenge directory.
 
 ## Requirements
 
@@ -51,6 +51,7 @@ First run may take a while because FlagDock builds missing Docker images automat
 ```yaml
 workspace:
   bindHost: 0.0.0.0
+  challengesDir: ./challenges
 
 attach:
   host: 192.168.0.214
@@ -60,6 +61,7 @@ backend:
 ```
 
 - `workspace.bindHost`: bind address for published container ports
+- `workspace.challengesDir`: challenge root directory, relative to the repo root or an absolute path
 - `attach.host`: host/IP shown by `flagdock attach`
 - `backend.mode`: `opencode`, `codex`, or `race`
 
@@ -82,7 +84,7 @@ Example files live in `config_examples/`:
 
 ## Challenge Layout
 
-Each challenge must live under `challenges/` and include `challenge.md`:
+Each challenge must live under `workspace.challengesDir` (default `challenges/`) and include `challenge.md`:
 
 ```text
 challenges/<name>/

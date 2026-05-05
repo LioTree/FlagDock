@@ -2,6 +2,7 @@
 # Keep 127.0.0.1 when accessing the server through SSH port forwarding.
 workspace:
   bindHost: 0.0.0.0
+  challengesDir: ./challenges
 
 # Host/IP printed by `flagdock attach`.
 # Set this to your server IP or DNS name when opening URLs from another machine.

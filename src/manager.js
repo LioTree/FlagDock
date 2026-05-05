@@ -14,7 +14,7 @@ import {
   SOLUTION_WRITEUP_FILE,
 } from "./constants.js";
 import { CodexAppClient, codexContainerWsUrl, codexHttpUrl, codexWsUrl, waitForCodex } from "./codex.js";
-import { getChallengeInfo, scanChallenges } from "./challenges.js";
+import { getChallengeInfo, getChallengeInfoAtPath, scanChallenges } from "./challenges.js";
 import { buildWorkspaceUrls, loadFlagDockConfig } from "./config.js";
 import {
   backendContainerName,
@@ -157,6 +157,23 @@ export class FlagDockManager {
     this.state = await loadState();
   }
 
+  async configuredChallengeInfo(challenge, config = null) {
+    const resolvedConfig = config ?? await loadFlagDockConfig();
+    return getChallengeInfo(challenge, resolvedConfig.workspace.challengesDir);
+  }
+
+  async workspaceChallengeInfo(workspace, config = null) {
+    if (workspace?.sourceDir) {
+      return getChallengeInfoAtPath(workspace.challenge, workspace.sourceDir);
+    }
+    return this.configuredChallengeInfo(workspace.challenge, config);
+  }
+
+  async configuredChallengeList(config = null) {
+    const resolvedConfig = config ?? await loadFlagDockConfig();
+    return scanChallenges(resolvedConfig.workspace.challengesDir, this.state.workspaces);
+  }
+
   async save() {
     await saveState(this.state);
   }
@@ -243,7 +260,7 @@ export class FlagDockManager {
     }
     if (request.method === "GET" && url.pathname === "/challenges") {
       await this.refreshWorkspaceContainerStates();
-      this.writeJson(response, 200, { challenges: await scanChallenges(this.state.workspaces) });
+      this.writeJson(response, 200, { challenges: await this.configuredChallengeList() });
       return;
     }
     if (request.method === "POST" && url.pathname === "/challenge/start") {
@@ -378,7 +395,7 @@ export class FlagDockManager {
     await this.refreshWorkspaceContainerStates();
     const workspaces = [];
     for (const workspace of Object.values(this.state.workspaces)) {
-      const info = await getChallengeInfo(workspace.challenge);
+      const info = await this.workspaceChallengeInfo(workspace);
       workspaces.push(this.workspaceSummary(workspace, info));
     }
     return {
@@ -444,7 +461,7 @@ export class FlagDockManager {
   }
 
   async reconcileSolvedBy(workspace, info = null) {
-    const resolvedInfo = info ?? await getChallengeInfo(workspace.challenge);
+    const resolvedInfo = info ?? await this.workspaceChallengeInfo(workspace);
     if (workspace.solvedBy && resolvedInfo.solvedBackends.includes(workspace.solvedBy)) {
       return workspace.solvedBy;
     }
@@ -453,15 +470,19 @@ export class FlagDockManager {
   }
 
   async prepareChallengeBackends(challenge, backends) {
-    const info = await getChallengeInfo(challenge);
+    const config = await loadFlagDockConfig();
+    const info = await this.configuredChallengeInfo(challenge, config);
     if (!info.valid) {
       throw new Error(`Challenge ${challenge} is invalid or missing challenge.md`);
     }
     const resolvedBackends = [...new Set(backends.map((backend) => validateBackend(backend)))];
     await ensureAgentRuntimeFiles();
     await ensureImages(resolvedBackends, (message) => this.log(message));
-    const config = await loadFlagDockConfig();
     const workspace = this.getWorkspace(challenge);
+    if (workspace.sourceDir && path.resolve(workspace.sourceDir) !== path.resolve(info.dir)) {
+      throw new Error(`Workspace ${challenge} is already bound to ${workspace.sourceDir}; remove it before using ${info.dir}`);
+    }
+    workspace.sourceDir ??= info.dir;
     for (const backend of resolvedBackends) {
       await this.ensureBackendWorkspace(workspace, backend, info, config);
     }
@@ -566,7 +587,7 @@ export class FlagDockManager {
     if (!backendState?.challengeDir) {
       return { flag: false, writeup: false };
     }
-    const info = await getChallengeInfo(workspace.challenge);
+    const info = await this.workspaceChallengeInfo(workspace);
     const solution = info.solutions[backend];
     const runtime = this.solutionRuntimePaths(workspace, backend);
     if (!solution || !runtime) {
@@ -712,7 +733,7 @@ export class FlagDockManager {
         directory: CONTAINER_CHALLENGE_DIR,
       })).catch(() => ({})),
     ]);
-    const solved = (await getChallengeInfo(workspace.challenge)).solutions.opencode.solved;
+    const solved = (await this.workspaceChallengeInfo(workspace)).solutions.opencode.solved;
     for (const session of sessions) {
       const existing = sessionCollection(backendState)[session.id] ?? {};
       const registry = {
@@ -764,7 +785,7 @@ export class FlagDockManager {
     if (backendState.status !== "running") {
       return Object.values(sessionCollection(backendState));
     }
-    const solved = (await getChallengeInfo(workspace.challenge)).solutions.codex.solved;
+    const solved = (await this.workspaceChallengeInfo(workspace)).solutions.codex.solved;
     const client = await this.getCodexClient(backendState);
     for (const session of Object.values(sessionCollection(backendState))) {
       if (!session.thread_id) {
@@ -976,7 +997,7 @@ export class FlagDockManager {
     const selectedMode = validateMode(mode);
     const config = await loadFlagDockConfig();
     const backends = configuredBackends(config.backend.mode);
-    const info = await getChallengeInfo(challenge);
+    const info = await this.configuredChallengeInfo(challenge, config);
     if (!info.valid) {
       throw new Error(`Challenge ${challenge} is invalid or missing challenge.md`);
     }
@@ -1006,7 +1027,7 @@ export class FlagDockManager {
     }
     const firstBackend = backends[0];
     return {
-      workspace: this.workspaceSummary(workspace, await getChallengeInfo(workspace.challenge)),
+      workspace: this.workspaceSummary(workspace, await this.workspaceChallengeInfo(workspace)),
       backend_mode: config.backend.mode,
       primary_session: primaries[firstBackend],
       opencode_primary_session: primaries.opencode,
@@ -1100,7 +1121,7 @@ export class FlagDockManager {
       stopped: Object.values(results).some(Boolean),
       opencode_stopped: results.opencode,
       codex_stopped: results.codex,
-      workspace: this.workspaceSummary(workspace, await getChallengeInfo(challenge)),
+      workspace: this.workspaceSummary(workspace, await this.workspaceChallengeInfo(workspace)),
     };
   }
 
@@ -1194,7 +1215,7 @@ export class FlagDockManager {
       throw new Error(`agent turn failed: ${errorSummary(result.error)}`);
     }
     await this.syncBackendOutputs(workspace, "opencode");
-    const solved = (await getChallengeInfo(workspace.challenge)).solved;
+    const solved = (await this.workspaceChallengeInfo(workspace)).solved;
     await this.reconcileSolvedBy(workspace);
     this.updateSessionRegistry(workspace, "opencode", sessionID, {
       last_response_at: nowIso(),
@@ -1235,7 +1256,7 @@ export class FlagDockManager {
       throw new Error(`codex turn failed: ${errorSummary(turn.error)}`);
     }
     await this.syncBackendOutputs(workspace, "codex");
-    const solved = (await getChallengeInfo(workspace.challenge)).solved;
+    const solved = (await this.workspaceChallengeInfo(workspace)).solved;
     await this.reconcileSolvedBy(workspace);
     this.updateSessionRegistry(workspace, "codex", sessionID, {
       active_turn_id: "",
@@ -1271,7 +1292,7 @@ export class FlagDockManager {
         return;
       }
 
-      const info = await getChallengeInfo(challenge);
+      const info = await this.workspaceChallengeInfo(workspace);
       await this.reconcileSolvedBy(workspace, info);
       if (info.solved && registry.writeup_prompt_sent_at) {
         return;
@@ -1290,7 +1311,7 @@ export class FlagDockManager {
         if (kind === "writeup") {
           return;
         }
-        if ((await getChallengeInfo(challenge)).solved) {
+        if ((await this.workspaceChallengeInfo(workspace)).solved) {
           return;
         }
         kind = "continue";
@@ -1310,7 +1331,7 @@ export class FlagDockManager {
   }
 
   async maybeDriveWorkspace(workspace) {
-    const info = await getChallengeInfo(workspace.challenge);
+    const info = await this.workspaceChallengeInfo(workspace);
     await this.reconcileSolvedBy(workspace, info);
     const sessions = this.sessionEntries(workspace);
     if (!info.solved && this.clearSolveBroadcastState(workspace)) {

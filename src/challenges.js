@@ -3,20 +3,20 @@ import path from "node:path";
 import { BACKENDS, CHALLENGES_DIR, SOLUTION_FLAG_FILE, SOLUTION_WRITEUP_FILE } from "./constants.js";
 import { nonEmptyFile, pathExists } from "./util.js";
 
-export async function resolveChallengePath(challenge) {
+export async function resolveChallengePath(challenge, challengesDir = CHALLENGES_DIR) {
   if (!challenge || challenge.includes("/") || challenge.includes("\\") || challenge === "." || challenge === "..") {
     throw new Error(`Invalid challenge name: ${challenge}`);
   }
-  const challengeDir = path.resolve(CHALLENGES_DIR, challenge);
-  const root = `${path.resolve(CHALLENGES_DIR)}${path.sep}`;
-  if (!challengeDir.startsWith(root)) {
+  const rootDir = path.resolve(challengesDir);
+  const challengeDir = path.resolve(rootDir, challenge);
+  const root = rootDir.endsWith(path.sep) ? rootDir : `${rootDir}${path.sep}`;
+  if (challengeDir !== rootDir && !challengeDir.startsWith(root)) {
     throw new Error(`Invalid challenge path: ${challenge}`);
   }
   return challengeDir;
 }
 
-export async function getChallengeInfo(challenge) {
-  const dir = await resolveChallengePath(challenge);
+export async function getChallengeInfoAtPath(challenge, dir) {
   const challengeMd = path.join(dir, "challenge.md");
   const exists = await pathExists(dir);
   const valid = exists && await pathExists(challengeMd);
@@ -51,10 +51,15 @@ export async function getChallengeInfo(challenge) {
   };
 }
 
-export async function scanChallenges(workspaces = {}) {
+export async function getChallengeInfo(challenge, challengesDir = CHALLENGES_DIR) {
+  const dir = await resolveChallengePath(challenge, challengesDir);
+  return getChallengeInfoAtPath(challenge, dir);
+}
+
+export async function scanChallenges(challengesDir = CHALLENGES_DIR, workspaces = {}) {
   let entries = [];
   try {
-    entries = await fs.readdir(CHALLENGES_DIR, { withFileTypes: true });
+    entries = await fs.readdir(challengesDir, { withFileTypes: true });
   } catch (error) {
     if (error?.code !== "ENOENT") {
       throw error;
@@ -66,7 +71,7 @@ export async function scanChallenges(workspaces = {}) {
     if (!entry.isDirectory()) {
       continue;
     }
-    const info = await getChallengeInfo(entry.name);
+    const info = await getChallengeInfo(entry.name, challengesDir);
     const workspace = workspaces[entry.name];
     let status = info.baseStatus;
     const backendStates = Object.values(workspace?.backends ?? {});
