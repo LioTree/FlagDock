@@ -227,7 +227,7 @@ export class CodexAppClient extends EventEmitter {
     const response = await this.request("thread/start", {
       cwd: CONTAINER_CHALLENGE_DIR,
       approvalPolicy: "never",
-      sandbox: "workspace-write",
+      sandbox: "danger-full-access",
       experimentalRawEvents: false,
       persistExtendedHistory: true,
     });
@@ -239,7 +239,7 @@ export class CodexAppClient extends EventEmitter {
       threadId: threadID,
       cwd: CONTAINER_CHALLENGE_DIR,
       approvalPolicy: "never",
-      sandbox: "workspace-write",
+      sandbox: "danger-full-access",
       excludeTurns: true,
       persistExtendedHistory: true,
     });
