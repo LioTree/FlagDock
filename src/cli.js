@@ -18,7 +18,9 @@ function usage() {
   flagdock status
   flagdock challenges
   flagdock challenge start <challenge> [--mode auto|manual]
+  flagdock challenge start --all [--mode auto|manual]
   flagdock challenge reset <challenge>
+  flagdock challenge reset --all
   flagdock sessions <challenge> [--backend opencode|codex]
   flagdock attach <challenge> [--backend opencode|codex] [--session <session_id>]
   flagdock session new <challenge> [--backend opencode|codex] [--mode auto|manual]
@@ -41,12 +43,29 @@ function lastArg(args) {
   return args[args.length - 1];
 }
 
-function warnDeprecated(command, replacement) {
-  console.warn(`deprecated: use \`${replacement}\` instead of \`${command}\``);
-}
-
 function isAllScope(args) {
   return args.length === 1 && args[0] === "--all";
+}
+
+function hasFlag(args, name) {
+  return args.includes(name);
+}
+
+function positionalArgs(args, valueOptions = []) {
+  const optionsWithValues = new Set(valueOptions);
+  const positions = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (optionsWithValues.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      continue;
+    }
+    positions.push(arg);
+  }
+  return positions;
 }
 
 async function ping(info) {
@@ -190,14 +209,29 @@ async function showChallenges() {
 }
 
 async function startChallenge(args) {
-  const challenge = args[0];
-  if (!challenge) {
-    throw new Error(usage());
-  }
   if (args.includes("--force")) {
     throw new Error("`--force` is not supported for challenge start");
   }
+  const positions = positionalArgs(args, ["--mode"]);
   const mode = parseOption(args, "--mode") ?? "auto";
+  if (hasFlag(args, "--all")) {
+    if (positions.length > 0) {
+      throw new Error(usage());
+    }
+    const result = await request("POST", "/challenge/start-all", { mode });
+    printTable(result.challenges ?? [], [
+      { header: "challenge", value: (row) => row.challenge },
+      { header: "status", value: (row) => row.status ?? "" },
+      { header: "result", value: (row) => row.result ?? "" },
+      { header: "detail", value: (row) => row.detail ?? truncate(row.error ?? "", 56) },
+    ]);
+    console.log(`started: ${result.started ?? 0} skipped: ${result.skipped ?? 0} failed: ${result.failed ?? 0} total: ${result.count ?? 0}`);
+    return;
+  }
+  if (positions.length !== 1) {
+    throw new Error(usage());
+  }
+  const [challenge] = positions;
   const result = await request("POST", "/challenge/start", { challenge, mode });
   if (result.skipped) {
     console.log(`challenge ${result.challenge} already has a backend solution; auto start skipped`);
@@ -226,10 +260,25 @@ async function startChallenge(args) {
 }
 
 async function resetChallenge(args) {
-  const challenge = args[0];
-  if (!challenge) {
+  const positions = positionalArgs(args);
+  if (hasFlag(args, "--all")) {
+    if (positions.length > 0) {
+      throw new Error(usage());
+    }
+    const result = await request("POST", "/challenge/reset-all");
+    printTable(result.challenges ?? [], [
+      { header: "challenge", value: (row) => row.challenge },
+      { header: "status", value: (row) => row.status ?? "" },
+      { header: "result", value: (row) => row.result ?? "" },
+      { header: "detail", value: (row) => row.detail ?? truncate(row.error ?? "", 56) },
+    ]);
+    console.log(`reset: ${result.reset ?? 0} unchanged: ${result.unchanged ?? 0} skipped: ${result.skipped ?? 0} failed: ${result.failed ?? 0} total: ${result.count ?? 0}`);
+    return;
+  }
+  if (positions.length !== 1) {
     throw new Error(usage());
   }
+  const [challenge] = positions;
   const result = await request("POST", "/challenge/reset", { challenge });
   console.log(JSON.stringify(result, null, 2));
 }

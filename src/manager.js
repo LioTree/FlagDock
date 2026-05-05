@@ -276,8 +276,16 @@ export class FlagDockManager {
       this.writeJson(response, 200, await this.startChallenge(await this.readBody(request)));
       return;
     }
+    if (request.method === "POST" && url.pathname === "/challenge/start-all") {
+      this.writeJson(response, 200, await this.startAllChallenges(await this.readBody(request)));
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/challenge/reset") {
       this.writeJson(response, 200, await this.resetChallenge(await this.readBody(request)));
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/challenge/reset-all") {
+      this.writeJson(response, 200, await this.resetAllChallenges());
       return;
     }
     if (request.method === "GET" && url.pathname === "/sessions") {
@@ -1189,6 +1197,117 @@ export class FlagDockManager {
       opencode_state_removed: solutionRemoved.opencode,
       codex_state_removed: solutionRemoved.codex,
       workspace_removed: hadWorkspace || workspaceResult.removed,
+    };
+  }
+
+  async startAllChallenges({ mode } = {}) {
+    const config = await loadFlagDockConfig();
+    await this.refreshWorkspaceContainerStates(config);
+    const challenges = await this.configuredChallengeList(config);
+    const results = [];
+    let started = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (const item of challenges) {
+      if (item.status !== "available") {
+        results.push({
+          challenge: item.challenge,
+          status: item.status,
+          result: "skipped",
+          detail: `status=${item.status}`,
+        });
+        skipped += 1;
+        continue;
+      }
+      try {
+        const result = await this.startChallenge({ challenge: item.challenge, mode });
+        if (result.skipped) {
+          results.push({
+            challenge: item.challenge,
+            status: item.status,
+            result: "skipped",
+            detail: result.reason ?? "skipped",
+          });
+          skipped += 1;
+          continue;
+        }
+        results.push({
+          challenge: item.challenge,
+          status: result.workspace.status,
+          result: "started",
+          detail: `mode=${mode ?? "auto"}`,
+        });
+        started += 1;
+      } catch (error) {
+        results.push({
+          challenge: item.challenge,
+          status: item.status,
+          result: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+        failed += 1;
+      }
+    }
+    return {
+      count: results.length,
+      started,
+      skipped,
+      failed,
+      challenges: results,
+    };
+  }
+
+  async resetAllChallenges() {
+    const config = await loadFlagDockConfig();
+    await this.refreshWorkspaceContainerStates(config);
+    const challenges = await this.configuredChallengeList(config);
+    const results = [];
+    let reset = 0;
+    let unchanged = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (const item of challenges) {
+      if (item.status === "invalid") {
+        results.push({
+          challenge: item.challenge,
+          status: item.status,
+          result: "skipped",
+          detail: "invalid challenge",
+        });
+        skipped += 1;
+        continue;
+      }
+      try {
+        const result = await this.resetChallenge({ challenge: item.challenge });
+        const changed = result.workspace_removed || result.opencode_state_removed || result.codex_state_removed;
+        results.push({
+          challenge: item.challenge,
+          status: result.status,
+          result: changed ? "reset" : "unchanged",
+          detail: changed ? "state cleared" : "already clean",
+        });
+        if (changed) {
+          reset += 1;
+        } else {
+          unchanged += 1;
+        }
+      } catch (error) {
+        results.push({
+          challenge: item.challenge,
+          status: item.status,
+          result: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+        failed += 1;
+      }
+    }
+    return {
+      count: results.length,
+      reset,
+      unchanged,
+      skipped,
+      failed,
+      challenges: results,
     };
   }
 
