@@ -14,7 +14,7 @@ import {
   SOLUTION_WRITEUP_FILE,
 } from "./constants.js";
 import { CodexAppClient, codexContainerWsUrl, codexHttpUrl, codexWsUrl, waitForCodex } from "./codex.js";
-import { getChallengeInfo, getChallengeInfoAtPath, scanChallenges } from "./challenges.js";
+import { getChallengeInfo, getChallengeInfoAtPath, removeChallengeSolutionStateDirIfEmpty, scanChallenges } from "./challenges.js";
 import { buildWorkspaceUrls, loadFlagDockConfig } from "./config.js";
 import {
   backendContainerName,
@@ -300,7 +300,7 @@ export class FlagDockManager {
       this.writeJson(response, 200, await this.stopWorkspace(await this.readBody(request)));
       return;
     }
-    if (request.method === "POST" && url.pathname === "/workspace/rm") {
+    if (request.method === "POST" && url.pathname === "/workspace/clear") {
       this.writeJson(response, 200, await this.removeWorkspace(await this.readBody(request)));
       return;
     }
@@ -308,7 +308,7 @@ export class FlagDockManager {
       this.writeJson(response, 200, await this.stopAllWorkspaces());
       return;
     }
-    if (request.method === "POST" && url.pathname === "/workspace/rm-all") {
+    if (request.method === "POST" && url.pathname === "/workspace/clear-all") {
       this.writeJson(response, 200, await this.removeAllWorkspaces());
       return;
     }
@@ -609,13 +609,13 @@ export class FlagDockManager {
     let copiedFlag = false;
     let copiedWriteup = false;
     if (await nonEmptyFile(runtime.flagPath)) {
-      await ensureDir(solution.dir);
+      await ensureDir(solution.stateDir);
       await fs.copyFile(runtime.flagPath, solution.flagPath);
       copiedFlag = true;
       workspace.solvedBy ??= backend;
     }
     if (await nonEmptyFile(runtime.writeupPath)) {
-      await ensureDir(solution.dir);
+      await ensureDir(solution.stateDir);
       await fs.copyFile(runtime.writeupPath, solution.writeupPath);
       copiedWriteup = true;
     }
@@ -1170,12 +1170,14 @@ export class FlagDockManager {
 
     const solutionRemoved = {};
     for (const backend of BACKENDS) {
-      const solutionDir = info.solutions[backend]?.dir;
-      solutionRemoved[backend] = solutionDir ? await pathExists(solutionDir) : false;
-      if (solutionDir) {
-        await fs.rm(solutionDir, { recursive: true, force: true });
+      const solution = info.solutions[backend];
+      const hadStateDir = solution?.stateDir ? await pathExists(solution.stateDir) : false;
+      solutionRemoved[backend] = hadStateDir;
+      if (solution?.stateDir) {
+        await fs.rm(solution.stateDir, { recursive: true, force: true });
       }
     }
+    await removeChallengeSolutionStateDirIfEmpty(challenge, info.dir).catch(() => {});
 
     const hadWorkspace = Boolean(this.state.workspaces[challenge]);
     const workspaceResult = await this.removeWorkspace({ challenge });
@@ -1184,8 +1186,8 @@ export class FlagDockManager {
       reset: true,
       challenge,
       status: refreshed.baseStatus,
-      opencode_solution_removed: solutionRemoved.opencode,
-      codex_solution_removed: solutionRemoved.codex,
+      opencode_state_removed: solutionRemoved.opencode,
+      codex_state_removed: solutionRemoved.codex,
       workspace_removed: hadWorkspace || workspaceResult.removed,
     };
   }

@@ -27,6 +27,7 @@ export const LOCAL_CODEX_DIR = path.join(LOCAL_DIR, "codex");
 export const CODEX_CONFIG_FILE = path.join(LOCAL_CODEX_DIR, "config.toml");
 export const CODEX_ENV_FILE = path.join(LOCAL_CODEX_DIR, "env");
 export const FLAGDOCK_CONFIG_FILE = path.join(ROOT_DIR, "flagdock.yaml");
+export const SOLUTIONS_DIR = path.join(STATE_DIR, "solutions");
 export const WORKSPACES_DIR = path.join(STATE_DIR, "workspaces");
 export const CONTAINER_CHALLENGE_DIR = "/challenge";
 export const AGENT_NAME = "ctf";

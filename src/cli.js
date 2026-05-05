@@ -24,9 +24,9 @@ function usage() {
   flagdock session new <challenge> [--backend opencode|codex] [--mode auto|manual]
   flagdock mode set <challenge> [--backend opencode|codex] --session <session_id> auto|manual
   flagdock workspace stop <challenge>
-  flagdock workspace rm <challenge>
-  flagdock workspace stop-all
-  flagdock workspace rm-all`;
+  flagdock workspace stop --all
+  flagdock workspace clear <challenge>
+  flagdock workspace clear --all`;
 }
 
 function parseOption(args, name) {
@@ -39,6 +39,14 @@ function parseOption(args, name) {
 
 function lastArg(args) {
   return args[args.length - 1];
+}
+
+function warnDeprecated(command, replacement) {
+  console.warn(`deprecated: use \`${replacement}\` instead of \`${command}\``);
+}
+
+function isAllScope(args) {
+  return args.length === 1 && args[0] === "--all";
 }
 
 async function ping(info) {
@@ -292,15 +300,17 @@ async function setMode(args) {
 
 async function workspaceAction(args, action) {
   const challenge = args[0];
-  if (!challenge) {
+  if (!challenge || args.includes("--all")) {
     throw new Error(usage());
   }
-  const result = await request("POST", `/workspace/${action}`, { challenge });
+  const pathname = action === "clear" ? "/workspace/clear" : `/workspace/${action}`;
+  const result = await request("POST", pathname, { challenge });
   console.log(JSON.stringify(result, null, 2));
 }
 
 async function workspaceAllAction(action) {
-  const result = await request("POST", `/workspace/${action}`);
+  const pathname = action === "clear" ? "/workspace/clear-all" : "/workspace/stop-all";
+  const result = await request("POST", pathname);
   printTable(result.workspaces ?? [], [
     { header: "challenge", value: (row) => row.challenge },
     { header: "status", value: (row) => row.status ?? "" },
@@ -358,12 +368,20 @@ export async function runCli(args) {
     await setMode(rest);
     return;
   }
-  if (command === "workspace" && (subcommand === "stop" || subcommand === "rm")) {
-    await workspaceAction(rest, subcommand);
+  if (command === "workspace" && subcommand === "stop" && isAllScope(rest)) {
+    await workspaceAllAction("stop");
     return;
   }
-  if (command === "workspace" && (subcommand === "stop-all" || subcommand === "rm-all")) {
-    await workspaceAllAction(subcommand);
+  if (command === "workspace" && subcommand === "clear" && isAllScope(rest)) {
+    await workspaceAllAction("clear");
+    return;
+  }
+  if (command === "workspace" && subcommand === "stop") {
+    await workspaceAction(rest, "stop");
+    return;
+  }
+  if (command === "workspace" && subcommand === "clear") {
+    await workspaceAction(rest, "clear");
     return;
   }
   throw new Error(usage());
