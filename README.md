@@ -113,6 +113,7 @@ node bin/flagdock.js challenges
 node bin/flagdock.js sessions <challenge>
 node bin/flagdock.js challenge start <challenge> --mode auto
 node bin/flagdock.js challenge start <challenge> --mode manual
+node bin/flagdock.js challenge reset <challenge>
 node bin/flagdock.js attach <challenge> --backend opencode
 node bin/flagdock.js attach <challenge> --backend codex
 node bin/flagdock.js stop
@@ -126,6 +127,7 @@ node bin/flagdock.js stop
 ## Notes
 
 - If a backend already has a non-empty `flag.txt`, `challenge start --mode auto` skips it
+- `challenge reset <challenge>` removes `opencode_solution/`, `codex_solution/`, and any existing workspace state so the challenge returns to `available`
 - `race` starts both backends; use `--backend` for commands like `attach`, `sessions`, and `session new`
 
 ## Check

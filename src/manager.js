@@ -24,6 +24,7 @@ import {
   ensureImages,
   inspectContainer,
   removeBackendWorkspaceDir,
+  removeChallengeWorkspaceDirIfEmpty,
   removeWorkspaceContainer,
   runDocker,
   startCodexWorkspaceContainer,
@@ -33,7 +34,7 @@ import {
 import { createAttachedRuntime, defaultSessionOptions, requireData, waitForOpenCode } from "./opencode.js";
 import { ensureAgentRuntimeFiles, readSessionPrompt } from "./prompts.js";
 import { loadState, saveDaemonInfo, saveState } from "./state.js";
-import { appendText, attachDirectorySegment, ensureDir, nonEmptyFile, nowIso, sleep } from "./util.js";
+import { appendText, attachDirectorySegment, ensureDir, nonEmptyFile, nowIso, pathExists, sleep } from "./util.js";
 
 const DEFAULT_MODE = "auto";
 const VALID_MODES = new Set(["auto", "manual"]);
@@ -169,6 +170,14 @@ export class FlagDockManager {
     return this.configuredChallengeInfo(workspace.challenge, config);
   }
 
+  async challengeInfoForAction(challenge, config = null) {
+    const workspace = this.state.workspaces[challenge];
+    if (workspace) {
+      return this.workspaceChallengeInfo(workspace, config);
+    }
+    return this.configuredChallengeInfo(challenge, config);
+  }
+
   async configuredChallengeList(config = null) {
     const resolvedConfig = config ?? await loadFlagDockConfig();
     return scanChallenges(resolvedConfig.workspace.challengesDir, this.state.workspaces);
@@ -265,6 +274,10 @@ export class FlagDockManager {
     }
     if (request.method === "POST" && url.pathname === "/challenge/start") {
       this.writeJson(response, 200, await this.startChallenge(await this.readBody(request)));
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/challenge/reset") {
+      this.writeJson(response, 200, await this.resetChallenge(await this.readBody(request)));
       return;
     }
     if (request.method === "GET" && url.pathname === "/sessions") {
@@ -1136,12 +1149,44 @@ export class FlagDockManager {
       await removeBackendWorkspaceDir(challenge, backend).catch(() => {});
       await this.disposeBackendRuntime(workspace?.backends?.[backend]);
     }
+    await removeChallengeWorkspaceDirIfEmpty(challenge).catch(() => {});
     delete this.state.workspaces[challenge];
     await this.save();
     return {
       removed: Object.values(results).some(Boolean),
       opencode_removed: results.opencode,
       codex_removed: results.codex,
+    };
+  }
+
+  async resetChallenge({ challenge }) {
+    if (!challenge) {
+      throw new Error("challenge is required");
+    }
+    const info = await this.challengeInfoForAction(challenge);
+    if (!info.valid) {
+      throw new Error(`Challenge ${challenge} is invalid or missing challenge.md`);
+    }
+
+    const solutionRemoved = {};
+    for (const backend of BACKENDS) {
+      const solutionDir = info.solutions[backend]?.dir;
+      solutionRemoved[backend] = solutionDir ? await pathExists(solutionDir) : false;
+      if (solutionDir) {
+        await fs.rm(solutionDir, { recursive: true, force: true });
+      }
+    }
+
+    const hadWorkspace = Boolean(this.state.workspaces[challenge]);
+    const workspaceResult = await this.removeWorkspace({ challenge });
+    const refreshed = await getChallengeInfoAtPath(challenge, info.dir);
+    return {
+      reset: true,
+      challenge,
+      status: refreshed.baseStatus,
+      opencode_solution_removed: solutionRemoved.opencode,
+      codex_solution_removed: solutionRemoved.codex,
+      workspace_removed: hadWorkspace || workspaceResult.removed,
     };
   }
 

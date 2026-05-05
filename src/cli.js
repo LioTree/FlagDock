@@ -18,6 +18,7 @@ function usage() {
   flagdock status
   flagdock challenges
   flagdock challenge start <challenge> [--mode auto|manual]
+  flagdock challenge reset <challenge>
   flagdock sessions <challenge> [--backend opencode|codex]
   flagdock attach <challenge> [--backend opencode|codex] [--session <session_id>]
   flagdock session new <challenge> [--backend opencode|codex] [--mode auto|manual]
@@ -216,6 +217,15 @@ async function startChallenge(args) {
   }
 }
 
+async function resetChallenge(args) {
+  const challenge = args[0];
+  if (!challenge) {
+    throw new Error(usage());
+  }
+  const result = await request("POST", "/challenge/reset", { challenge });
+  console.log(JSON.stringify(result, null, 2));
+}
+
 async function showSessions(args) {
   const challenge = args[0];
   if (!challenge) {
@@ -326,6 +336,10 @@ export async function runCli(args) {
   }
   if (command === "challenge" && subcommand === "start") {
     await startChallenge(rest);
+    return;
+  }
+  if (command === "challenge" && subcommand === "reset") {
+    await resetChallenge(rest);
     return;
   }
   if (command === "sessions") {

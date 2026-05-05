@@ -59,12 +59,28 @@ export function backendWorkspaceRoot(challenge, backend) {
   return path.join(WORKSPACES_DIR, slugify(challenge), backend);
 }
 
+export function challengeWorkspaceRoot(challenge) {
+  return path.join(WORKSPACES_DIR, slugify(challenge));
+}
+
 export function backendChallengeDir(challenge, backend) {
   return path.join(backendWorkspaceRoot(challenge, backend), "challenge");
 }
 
 export async function removeBackendWorkspaceDir(challenge, backend) {
   await fs.rm(backendWorkspaceRoot(challenge, backend), { recursive: true, force: true });
+}
+
+export async function removeChallengeWorkspaceDirIfEmpty(challenge) {
+  const workspaceRoot = challengeWorkspaceRoot(challenge);
+  try {
+    await fs.rmdir(workspaceRoot);
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTEMPTY") {
+      return;
+    }
+    throw error;
+  }
 }
 
 export async function dockerAvailable() {
@@ -170,6 +186,10 @@ async function ensureBackendChallengeCopy(challenge, challengeDir, backend) {
   return target;
 }
 
+async function ensureCodexChallengeAgentsFile(challengeDir) {
+  await fs.copyFile(RUNTIME_CODEX_AGENTS_FILE, path.join(challengeDir, "AGENTS.md"));
+}
+
 async function ensureExpectedMounts(inspected, name, expectedMounts, log = () => {}) {
   if (!inspected) {
     return null;
@@ -180,6 +200,21 @@ async function ensureExpectedMounts(inspected, name, expectedMounts, log = () =>
       continue;
     }
     log(`recreating container ${name} to refresh ${mount.destination} mount`);
+    await runDocker(["rm", "-f", name]);
+    return null;
+  }
+  return inspected;
+}
+
+async function ensureMountsAbsent(inspected, name, destinations, log = () => {}) {
+  if (!inspected) {
+    return null;
+  }
+  for (const destination of destinations) {
+    if (!containerMountSource(inspected, destination)) {
+      continue;
+    }
+    log(`recreating container ${name} to remove ${destination} mount`);
     await runDocker(["rm", "-f", name]);
     return null;
   }
@@ -253,10 +288,13 @@ export async function startWorkspaceContainer({ bindHost, challenge, challengeDi
 export async function startCodexWorkspaceContainer({ bindHost, challenge, challengeDir, log = () => {} }) {
   const name = backendContainerName(challenge, "codex");
   const runtimeChallengeDir = await ensureBackendChallengeCopy(challenge, challengeDir, "codex");
+  await ensureCodexChallengeAgentsFile(runtimeChallengeDir);
   let inspected = await inspectContainer(name);
   inspected = await ensureExpectedMounts(inspected, name, [
     { destination: CONTAINER_CHALLENGE_DIR, source: runtimeChallengeDir },
-    { destination: `${CONTAINER_CHALLENGE_DIR}/AGENTS.md`, source: RUNTIME_CODEX_AGENTS_FILE },
+  ], log);
+  inspected = await ensureMountsAbsent(inspected, name, [
+    `${CONTAINER_CHALLENGE_DIR}/AGENTS.md`,
   ], log);
   if (inspected && !containerRunning(inspected)) {
     log(`starting existing container ${name}`);
@@ -289,8 +327,6 @@ export async function startCodexWorkspaceContainer({ bindHost, challenge, challe
       path.resolve(CODEX_ENV_FILE),
       "-v",
       `${path.resolve(runtimeChallengeDir)}:${CONTAINER_CHALLENGE_DIR}`,
-      "-v",
-      `${path.resolve(RUNTIME_CODEX_AGENTS_FILE)}:${CONTAINER_CHALLENGE_DIR}/AGENTS.md:ro`,
       "-v",
       `${path.resolve(codexHomeDir)}:/root/.codex`,
       "-v",
