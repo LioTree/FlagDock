@@ -22,7 +22,7 @@ function usage() {
   flagdock challenge reset <challenge>
   flagdock challenge reset --all
   flagdock sessions <challenge> [--backend opencode|codex]
-  flagdock attach <challenge> [--backend opencode|codex] [--session <session_id>]
+  flagdock attach [challenge] [--backend opencode|codex] [--session <session_id>]
   flagdock session new <challenge> [--backend opencode|codex] [--mode auto|manual]
   flagdock mode set <challenge> [--backend opencode|codex] --session <session_id> auto|manual
   flagdock workspace stop <challenge>
@@ -125,6 +125,38 @@ function printTable(rows, columns) {
 function truncate(value, max = 64) {
   const text = String(value ?? "");
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function openUrl(url) {
+  if (!url) {
+    return;
+  }
+  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  try {
+    const child = spawn(command, args, { detached: true, stdio: "ignore" });
+    child.on("error", () => {});
+    child.unref();
+  } catch {
+    // Printing the URL is the reliable path; opening it is best-effort.
+  }
+}
+
+async function runInteractive(argv) {
+  if (!Array.isArray(argv) || argv.length === 0) {
+    throw new Error("attach command is missing argv");
+  }
+  await new Promise((resolve, reject) => {
+    const child = spawn(argv[0], argv.slice(1), { stdio: "inherit" });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`${argv[0]} exited with ${code}`));
+    });
+  });
 }
 
 async function startManager() {
@@ -307,13 +339,17 @@ async function showSessions(args) {
 }
 
 async function attach(args) {
-  const challenge = args[0];
-  if (!challenge) {
+  const positions = positionalArgs(args, ["--backend", "--session"]);
+  if (positions.length > 1) {
     throw new Error(usage());
   }
+  const challenge = positions[0] ?? null;
   const backend = parseOption(args, "--backend");
   const session = parseOption(args, "--session");
-  const query = new URLSearchParams({ challenge });
+  const query = new URLSearchParams();
+  if (challenge) {
+    query.set("challenge", challenge);
+  }
   if (backend) {
     query.set("backend", backend);
   }
@@ -321,7 +357,23 @@ async function attach(args) {
     query.set("session", session);
   }
   const result = await request("GET", `/attach?${query}`);
-  console.log(result.command ?? result.url);
+  if (result.mode === "list") {
+    printTable(result.attach ?? [], [
+      { header: "challenge", value: (row) => row.challenge },
+      { header: "backend", value: (row) => row.backend },
+      { header: "session", value: (row) => row.session },
+      { header: "role", value: (row) => row.role },
+      { header: "status", value: (row) => row.status },
+      { header: "attach", value: (row) => row.attach },
+    ]);
+    return;
+  }
+  if (result.backend === "codex") {
+    await runInteractive(result.argv);
+    return;
+  }
+  console.log(result.url);
+  openUrl(result.url);
 }
 
 async function newSession(args) {

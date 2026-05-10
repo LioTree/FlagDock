@@ -11,7 +11,7 @@
     "start": "node bin/flagdock.js start",
     "stop": "node bin/flagdock.js stop",
     "check": "node --check bin/flagdock.js && node --check src/manager.js && node --check src/cli.js && node --check src/docker.js && node --check src/config.js && node --check src/opencode.js && node --check src/codex.js && node --check src/challenges.js && node --check src/state.js && node --check src/prompts.js && node --check src/util.js",
-    "test": "npm run check"
+    "test": "npm run check && node --test"
   },
   "keywords": [],
   "author": "",

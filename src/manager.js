@@ -104,6 +104,10 @@ function codexAttachSessionName(sessionID) {
   return `codex-${sessionID.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48)}`;
 }
 
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
 function messageErrorSummary(message) {
   const error = message?.info?.error;
   if (!error) {
@@ -122,6 +126,10 @@ function errorSummary(error) {
     return error;
   }
   return JSON.stringify(error) ?? String(error);
+}
+
+function isCodexUnmaterializedThreadError(error) {
+  return errorSummary(error).includes(" is not materialized");
 }
 
 function emptyBackendState(backend) {
@@ -822,6 +830,12 @@ export class FlagDockManager {
         }
         session.last_error = "";
       } catch (error) {
+        if (isCodexUnmaterializedThreadError(error)) {
+          session.status = session.status === "active" ? "active" : "idle";
+          session.last_seen_at = nowIso();
+          session.last_error = "";
+          continue;
+        }
         session.last_error = errorSummary(error);
       }
     }
@@ -955,16 +969,140 @@ export class FlagDockManager {
     return sessions.sort((a, b) => a.created_at.localeCompare(b.created_at));
   }
 
+  codexAttachTarget(workspace, session) {
+    const backendState = this.backendState(workspace, "codex");
+    const tmuxSession = codexAttachSessionName(session.session_id);
+    const container = backendState.containerName;
+    const argv = ["docker", "exec", "-it", container, "tmux", "attach-session", "-t", tmuxSession];
+    return {
+      challenge: workspace.challenge,
+      backend: "codex",
+      session: session.session_id,
+      role: session.role ?? "",
+      status: session.status ?? "",
+      thread_id: session.thread_id,
+      tmux_session: tmuxSession,
+      argv,
+      command: argv.map(shellQuote).join(" "),
+      url: backendState.wsUrl,
+    };
+  }
+
+  async attachCodex(workspace, session) {
+    const backendState = this.backendState(workspace, "codex");
+    if (!backendState || backendState.status !== "running") {
+      throw new Error(`Codex workspace ${workspace.challenge} is not running`);
+    }
+    const target = this.codexAttachTarget(workspace, session);
+    const command = `codex --remote ${codexContainerWsUrl()} resume ${session.thread_id} --no-alt-screen`;
+    const hasSession = await runDocker(["exec", backendState.containerName, "tmux", "has-session", "-t", target.tmux_session])
+      .then(() => true)
+      .catch(() => false);
+    if (!hasSession) {
+      await runDocker(["exec", backendState.containerName, "tmux", "new-session", "-d", "-s", target.tmux_session, command]);
+    }
+    return target;
+  }
+
+  attachTarget(workspace, backend, session) {
+    if (backend === "codex") {
+      return this.codexAttachTarget(workspace, session);
+    }
+    return {
+      challenge: workspace.challenge,
+      backend: "opencode",
+      session: session.session_id,
+      role: session.role ?? "",
+      status: session.status ?? "",
+      url: session.url,
+      command: session.url,
+    };
+  }
+
+  async resolveAttachTarget(workspace, backend, session) {
+    if (backend === "codex") {
+      return this.attachCodex(workspace, session);
+    }
+    return this.attachTarget(workspace, backend, session);
+  }
+
+  async listAttachTargets(challenge = null, backend = null) {
+    if (backend) {
+      validateBackend(backend);
+    }
+    const workspaces = challenge
+      ? [this.state.workspaces[challenge]].filter(Boolean)
+      : Object.values(this.state.workspaces);
+    const rows = [];
+    for (const workspace of workspaces) {
+      await this.refreshWorkspaceContainerState(workspace);
+      const selectedBackends = backend ? [backend] : Object.keys(workspace.backends ?? {});
+      for (const item of selectedBackends) {
+        const backendState = this.backendState(workspace, item);
+        if (!backendState) {
+          continue;
+        }
+        await this.syncSessions(workspace, item);
+        for (const session of Object.values(backendState.sessions ?? {})) {
+          const base = {
+            challenge: workspace.challenge,
+            backend: item,
+            session: session.session_id,
+            role: session.role ?? "",
+            status: session.status ?? "",
+          };
+          if (backendState.status !== "running") {
+            rows.push({ ...base, attach: "not running" });
+            continue;
+          }
+          const target = await this.resolveAttachTarget(workspace, item, session);
+          rows.push({ ...base, attach: target.command ?? target.url ?? "", url: target.url ?? "", command: target.command ?? "" });
+        }
+      }
+    }
+    return rows.sort((a, b) =>
+      a.challenge.localeCompare(b.challenge)
+      || a.backend.localeCompare(b.backend)
+      || a.session.localeCompare(b.session),
+    );
+  }
+
   async attach(challenge, sessionID, backend = null) {
     if (!challenge) {
-      throw new Error("challenge is required");
+      return { mode: "list", attach: await this.listAttachTargets(null, backend) };
     }
-    const selectedBackend = await this.resolveActionBackend(backend);
     const workspace = this.state.workspaces[challenge];
     if (!workspace) {
-      throw new Error(`Workspace ${challenge} is not running`);
+      if (backend || sessionID) {
+        throw new Error(`Workspace ${challenge} is not running`);
+      }
+      return { mode: "list", attach: [] };
     }
     await this.refreshWorkspaceContainerState(workspace);
+
+    if (!backend && !sessionID) {
+      return { mode: "list", attach: await this.listAttachTargets(challenge) };
+    }
+
+    let selectedBackend = backend ? validateBackend(backend) : null;
+    if (!selectedBackend && sessionID) {
+      const matches = [];
+      for (const item of Object.keys(workspace.backends ?? {})) {
+        const backendState = this.backendState(workspace, item);
+        if (!backendState) {
+          continue;
+        }
+        await this.syncSessions(workspace, item);
+        if (backendState.sessions?.[sessionID]) {
+          matches.push(item);
+        }
+      }
+      if (matches.length > 1) {
+        throw new Error(`Session ${sessionID} exists in multiple backends; pass --backend`);
+      }
+      selectedBackend = matches[0] ?? await this.resolveActionBackend(null);
+    }
+
     const backendState = this.backendState(workspace, selectedBackend);
     if (!backendState || backendState.status !== "running") {
       throw new Error(`${selectedBackend} workspace ${challenge} is not running`);
@@ -975,40 +1113,7 @@ export class FlagDockManager {
     if (!selected || !session) {
       throw new Error(`Session not found for ${challenge}`);
     }
-    if (selectedBackend === "codex") {
-      return this.attachCodex(workspace, session);
-    }
-    return {
-      challenge,
-      backend: "opencode",
-      session: selected,
-      url: session.url,
-    };
-  }
-
-  async attachCodex(workspace, session) {
-    const backendState = this.backendState(workspace, "codex");
-    if (!backendState || backendState.status !== "running") {
-      throw new Error(`Codex workspace ${workspace.challenge} is not running`);
-    }
-    const tmuxSession = codexAttachSessionName(session.session_id);
-    const container = backendState.containerName;
-    const command = `codex --remote ${codexContainerWsUrl()} resume ${session.thread_id} --no-alt-screen`;
-    const hasSession = await runDocker(["exec", container, "tmux", "has-session", "-t", tmuxSession])
-      .then(() => true)
-      .catch(() => false);
-    if (!hasSession) {
-      await runDocker(["exec", container, "tmux", "new-session", "-d", "-s", tmuxSession, command]);
-    }
-    return {
-      challenge: workspace.challenge,
-      backend: "codex",
-      session: session.session_id,
-      thread_id: session.thread_id,
-      tmux_session: tmuxSession,
-      command: `docker exec -it ${container} tmux attach-session -r -t ${tmuxSession}`,
-      url: backendState.wsUrl,
-    };
+    return { mode: "target", ...await this.resolveAttachTarget(workspace, selectedBackend, session) };
   }
 
   async startChallenge({ challenge, mode, force }) {
