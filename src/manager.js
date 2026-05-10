@@ -328,6 +328,14 @@ export class FlagDockManager {
       this.writeJson(response, 200, await this.removeAllWorkspaces());
       return;
     }
+    if (request.method === "POST" && url.pathname === "/workspace/stop-solved") {
+      this.writeJson(response, 200, await this.stopSolvedWorkspaces());
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/workspace/clear-solved") {
+      this.writeJson(response, 200, await this.removeSolvedWorkspaces());
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/stop") {
       this.writeJson(response, 200, { ok: true });
       setTimeout(() => this.close().then(() => process.exit(0)), 20);
@@ -1446,6 +1454,90 @@ export class FlagDockManager {
       count: results.length,
       workspaces: results,
     };
+  }
+
+  async applySolvedWorkspaceAction(action) {
+    if (action !== "stop" && action !== "clear") {
+      throw new Error(`Invalid workspace action: ${action}`);
+    }
+    await this.refreshWorkspaceContainerStates();
+    const results = [];
+    let changed = 0;
+    let unchanged = 0;
+    let failed = 0;
+    for (const challenge of Object.keys(this.state.workspaces).sort()) {
+      const workspace = this.state.workspaces[challenge];
+      if (!workspace) {
+        continue;
+      }
+      let summary = null;
+      try {
+        const info = await this.workspaceChallengeInfo(workspace);
+        if (!info.solved) {
+          continue;
+        }
+        summary = this.workspaceSummary(workspace, info);
+        const container = [summary.container, summary.codex_container].filter(Boolean).join(",");
+        if (action === "stop") {
+          const result = await this.stopWorkspace({ challenge });
+          const stopped = result.stopped === true;
+          if (stopped) {
+            changed += 1;
+          } else {
+            unchanged += 1;
+          }
+          results.push({
+            challenge,
+            status: result.workspace?.status ?? summary.status,
+            solved_by: summary.solved_by,
+            container,
+            stopped,
+            changed: stopped,
+            result: stopped ? "stopped" : "unchanged",
+            detail: stopped ? "containers stopped" : "no containers found",
+          });
+          continue;
+        }
+        await this.removeWorkspace({ challenge });
+        changed += 1;
+        results.push({
+          challenge,
+          status: summary.status,
+          solved_by: summary.solved_by,
+          container,
+          removed: true,
+          changed: true,
+          result: "cleared",
+          detail: "runtime workspace removed",
+        });
+      } catch (error) {
+        failed += 1;
+        results.push({
+          challenge,
+          status: summary?.status ?? "",
+          solved_by: summary?.solved_by ?? "",
+          container: summary ? [summary.container, summary.codex_container].filter(Boolean).join(",") : "",
+          changed: false,
+          result: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return {
+      count: results.length,
+      ...(action === "stop" ? { stopped: changed } : { cleared: changed }),
+      unchanged,
+      failed,
+      workspaces: results,
+    };
+  }
+
+  async stopSolvedWorkspaces() {
+    return this.applySolvedWorkspaceAction("stop");
+  }
+
+  async removeSolvedWorkspaces() {
+    return this.applySolvedWorkspaceAction("clear");
   }
 
   promptKind(kind) {

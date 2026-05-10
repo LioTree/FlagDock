@@ -132,8 +132,10 @@ node bin/flagdock.js challenge reset <challenge>
 node bin/flagdock.js challenge reset --all
 node bin/flagdock.js workspace stop <challenge>
 node bin/flagdock.js workspace stop --all
+node bin/flagdock.js workspace stop --solved
 node bin/flagdock.js workspace clear <challenge>
 node bin/flagdock.js workspace clear --all
+node bin/flagdock.js workspace clear --solved
 node bin/flagdock.js attach
 node bin/flagdock.js attach <challenge>
 node bin/flagdock.js attach <challenge> --backend opencode
@@ -145,6 +147,7 @@ node bin/flagdock.js stop
 - Use `challenge start --all` to batch-start every challenge currently in `available` state.
 - Use `workspace stop` to keep the current workspace state but stop its containers.
 - Use `workspace clear` to discard the runtime workspace while keeping saved outputs such as `flag.txt` and `wp.md`.
+- Add `--solved` to `workspace stop` or `workspace clear` to apply that action only to solved workspaces.
 - Use `challenge reset` to return a challenge to a clean `available` state.
 - Use `attach` without a backend to print a table of available OpenCode URLs and Codex tmux commands.
 

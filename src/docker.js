@@ -353,12 +353,10 @@ export async function startCodexWorkspaceContainer({ bindHost, challenge, challe
 export async function stopWorkspaceContainer(challenge, backend = "opencode") {
   const name = backendContainerName(challenge, backend);
   const inspected = await inspectContainer(name);
-  if (!inspected) {
+  if (!inspected || !containerRunning(inspected)) {
     return false;
   }
-  if (containerRunning(inspected)) {
-    await runDocker(["stop", name]);
-  }
+  await runDocker(["stop", name]);
   return true;
 }
 

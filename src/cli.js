@@ -27,8 +27,10 @@ function usage() {
   flagdock mode set <challenge> [--backend opencode|codex] --session <session_id> auto|manual
   flagdock workspace stop <challenge>
   flagdock workspace stop --all
+  flagdock workspace stop --solved
   flagdock workspace clear <challenge>
-  flagdock workspace clear --all`;
+  flagdock workspace clear --all
+  flagdock workspace clear --solved`;
 }
 
 function parseOption(args, name) {
@@ -45,6 +47,10 @@ function lastArg(args) {
 
 function isAllScope(args) {
   return args.length === 1 && args[0] === "--all";
+}
+
+function isSolvedScope(args) {
+  return args.length === 1 && args[0] === "--solved";
 }
 
 function hasFlag(args, name) {
@@ -401,7 +407,7 @@ async function setMode(args) {
 
 async function workspaceAction(args, action) {
   const challenge = args[0];
-  if (!challenge || args.includes("--all")) {
+  if (!challenge || args.length !== 1 || args.includes("--all") || args.includes("--solved")) {
     throw new Error(usage());
   }
   const pathname = action === "clear" ? "/workspace/clear" : `/workspace/${action}`;
@@ -421,6 +427,22 @@ async function workspaceAllAction(action) {
   if (typeof result.count === "number") {
     console.log(`total: ${result.count}`);
   }
+}
+
+async function workspaceSolvedAction(action) {
+  const pathname = action === "clear" ? "/workspace/clear-solved" : "/workspace/stop-solved";
+  const result = await request("POST", pathname);
+  printTable(result.workspaces ?? [], [
+    { header: "challenge", value: (row) => row.challenge },
+    { header: "status", value: (row) => row.status ?? "" },
+    { header: "solved_by", value: (row) => row.solved_by ?? "" },
+    { header: "container", value: (row) => row.container ?? "" },
+    { header: "changed", value: (row) => row.changed ?? false },
+    { header: "result", value: (row) => row.result ?? "" },
+    { header: "detail", value: (row) => truncate(row.detail ?? row.error ?? "", 56) },
+  ]);
+  const changedKey = action === "clear" ? "cleared" : "stopped";
+  console.log(`${changedKey}: ${result[changedKey] ?? 0} unchanged: ${result.unchanged ?? 0} failed: ${result.failed ?? 0} total: ${result.count ?? 0}`);
 }
 
 export async function runCli(args) {
@@ -475,6 +497,14 @@ export async function runCli(args) {
   }
   if (command === "workspace" && subcommand === "clear" && isAllScope(rest)) {
     await workspaceAllAction("clear");
+    return;
+  }
+  if (command === "workspace" && subcommand === "stop" && isSolvedScope(rest)) {
+    await workspaceSolvedAction("stop");
+    return;
+  }
+  if (command === "workspace" && subcommand === "clear" && isSolvedScope(rest)) {
+    await workspaceSolvedAction("clear");
     return;
   }
   if (command === "workspace" && subcommand === "stop") {
