@@ -15,6 +15,7 @@ import {
   OPENCODE_AUTH_FILE,
   OPENCODE_CONFIG_FILE,
   OPENCODE_PORT,
+  RUNTIME_OPENCODE_MANAGED_CONFIG_DIR,
   ROOT_DIR,
   SOLUTION_FLAG_FILE,
   SOLUTION_WRITEUP_FILE,
@@ -25,6 +26,10 @@ import {
 import { ensureDir, pathExists, slugify } from "./util.js";
 
 const execFileAsync = promisify(execFile);
+const CONTAINER_OPENCODE_AGENT_DIR = "/root/.opencode/agent";
+const CONTAINER_OPENCODE_CONFIG_FILE = "/root/.config/opencode/opencode.json";
+const CONTAINER_OPENCODE_AUTH_FILE = "/root/.local/share/opencode/auth.json";
+const CONTAINER_OPENCODE_MANAGED_CONFIG_DIR = "/etc/opencode";
 
 export async function runDocker(args, options = {}) {
   try {
@@ -221,13 +226,57 @@ async function ensureMountsAbsent(inspected, name, destinations, log = () => {})
   return inspected;
 }
 
+export function buildOpenCodeDockerArgs({
+  bindHost,
+  containerName,
+  runtimeChallengeDir,
+  agentDir,
+  managedConfigDir,
+  opencodeConfigFile = null,
+  opencodeAuthFile = null,
+  includeOpenCodeConfigContent = false,
+}) {
+  const args = [
+    "run",
+    "-d",
+    "--name",
+    containerName,
+    "--privileged",
+    "--cap-add=SYS_PTRACE",
+    "--security-opt",
+    "seccomp=unconfined",
+    "--add-host",
+    "host.docker.internal:host-gateway",
+    "-p",
+    `${bindHost}::${OPENCODE_PORT}`,
+    "-v",
+    `${path.resolve(runtimeChallengeDir)}:${CONTAINER_CHALLENGE_DIR}`,
+    "-v",
+    `${path.resolve(agentDir)}:${CONTAINER_OPENCODE_AGENT_DIR}:ro`,
+    "-v",
+    `${path.resolve(managedConfigDir)}:${CONTAINER_OPENCODE_MANAGED_CONFIG_DIR}:ro`,
+  ];
+  if (opencodeConfigFile) {
+    args.push("-v", `${path.resolve(opencodeConfigFile)}:${CONTAINER_OPENCODE_CONFIG_FILE}:ro`);
+  }
+  if (opencodeAuthFile) {
+    args.push("-v", `${path.resolve(opencodeAuthFile)}:${CONTAINER_OPENCODE_AUTH_FILE}:ro`);
+  }
+  if (includeOpenCodeConfigContent) {
+    args.push("-e", "OPENCODE_CONFIG_CONTENT");
+  }
+  args.push(WORK_IMAGE);
+  return args;
+}
+
 export async function startWorkspaceContainer({ bindHost, challenge, challengeDir, log = () => {} }) {
   const name = backendContainerName(challenge, "opencode");
   const runtimeChallengeDir = await ensureBackendChallengeCopy(challenge, challengeDir, "opencode");
   let inspected = await inspectContainer(name);
   inspected = await ensureExpectedMounts(inspected, name, [
     { destination: CONTAINER_CHALLENGE_DIR, source: runtimeChallengeDir },
-    { destination: "/root/.opencode/agent", source: RUNTIME_AGENT_DIR },
+    { destination: CONTAINER_OPENCODE_AGENT_DIR, source: RUNTIME_AGENT_DIR },
+    { destination: CONTAINER_OPENCODE_MANAGED_CONFIG_DIR, source: RUNTIME_OPENCODE_MANAGED_CONFIG_DIR },
   ], log);
   if (inspected && !containerRunning(inspected)) {
     log(`starting existing container ${name}`);
@@ -235,39 +284,20 @@ export async function startWorkspaceContainer({ bindHost, challenge, challengeDi
     inspected = await inspectContainer(name);
   }
   if (!inspected) {
-    const agentDir = path.resolve(RUNTIME_AGENT_DIR);
-    const args = [
-      "run",
-      "-d",
-      "--name",
-      name,
-      "--privileged",
-      "--cap-add=SYS_PTRACE",
-      "--security-opt",
-      "seccomp=unconfined",
-      "--add-host",
-      "host.docker.internal:host-gateway",
-      "-p",
-      `${bindHost}::${OPENCODE_PORT}`,
-      "-v",
-      `${path.resolve(runtimeChallengeDir)}:${CONTAINER_CHALLENGE_DIR}`,
-      "-v",
-      `${agentDir}:/root/.opencode/agent:ro`,
-    ];
     const opencodeConfigFile = await firstExistingPath([
       OPENCODE_CONFIG_FILE,
       LEGACY_OPENCODE_CONFIG_FILE,
     ]);
-    if (opencodeConfigFile) {
-      args.push("-v", `${path.resolve(opencodeConfigFile)}:/root/.config/opencode/opencode.json:ro`);
-    }
-    if (await pathExists(OPENCODE_AUTH_FILE)) {
-      args.push("-v", `${path.resolve(OPENCODE_AUTH_FILE)}:/root/.local/share/opencode/auth.json:ro`);
-    }
-    if (process.env.OPENCODE_CONFIG_CONTENT) {
-      args.push("-e", "OPENCODE_CONFIG_CONTENT");
-    }
-    args.push(WORK_IMAGE);
+    const args = buildOpenCodeDockerArgs({
+      bindHost,
+      containerName: name,
+      runtimeChallengeDir,
+      agentDir: RUNTIME_AGENT_DIR,
+      managedConfigDir: RUNTIME_OPENCODE_MANAGED_CONFIG_DIR,
+      opencodeConfigFile,
+      opencodeAuthFile: await pathExists(OPENCODE_AUTH_FILE) ? OPENCODE_AUTH_FILE : null,
+      includeOpenCodeConfigContent: Boolean(process.env.OPENCODE_CONFIG_CONTENT),
+    });
     log(`creating container ${name}`);
     await runDocker(args);
     inspected = await inspectContainer(name);
