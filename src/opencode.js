@@ -19,13 +19,26 @@ export async function createAttachedRuntime(serverUrl) {
   });
 }
 
+export async function listSessionMessages(runtime, sessionID, limit = 10) {
+  // The agent SDK does not yet expose historical session messages.
+  return requireData("session.messages", runtime.client.session.messages({
+    sessionID,
+    directory: runtime.directory,
+    limit,
+  }));
+}
+
+export async function readSessionInfo(runtime, sessionID) {
+  return runtime.getSessionInfo(sessionID);
+}
+
 export async function waitForOpenCode(runtimeFactory, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   while (Date.now() < deadline) {
     try {
       const runtime = await runtimeFactory();
-      await requireData("global.health", runtime.client.global.health());
+      await runtime.health();
       return runtime;
     } catch (error) {
       lastError = error;

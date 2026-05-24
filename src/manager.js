@@ -31,7 +31,7 @@ import {
   startWorkspaceContainer,
   stopWorkspaceContainer,
 } from "./docker.js";
-import { createAttachedRuntime, defaultSessionOptions, requireData, waitForOpenCode } from "./opencode.js";
+import { createAttachedRuntime, defaultSessionOptions, listSessionMessages, readSessionInfo, waitForOpenCode } from "./opencode.js";
 import { ensureAgentRuntimeFiles, readSessionPrompt } from "./prompts.js";
 import { loadState, saveDaemonInfo, saveState } from "./state.js";
 import { appendText, attachDirectorySegment, ensureDir, nonEmptyFile, nowIso, pathExists, sleep } from "./util.js";
@@ -64,21 +64,18 @@ function backendPort(backend) {
   return backend === "codex" ? CODEX_PORT : OPENCODE_PORT;
 }
 
-function normalizeSessionStatus(openCodeStatus, info, solved) {
-  if (info?.time?.archived) {
+function normalizeSessionStatus(status, solved, archived = false) {
+  if (archived) {
     return "closed";
   }
-  if (openCodeStatus?.type === "busy" || openCodeStatus?.type === "retry") {
+  if (status === "busy" || status === "retry") {
     return "active";
   }
-  if (solved && openCodeStatus?.type === "idle") {
+  if (solved && (status === "idle" || status === "unknown" || !status)) {
     return "completed";
   }
-  if (openCodeStatus?.type === "idle") {
+  if (status === "idle" || status === "unknown" || !status) {
     return "idle";
-  }
-  if (info) {
-    return solved ? "completed" : "idle";
   }
   return "unknown";
 }
@@ -110,6 +107,13 @@ function shellQuote(value) {
 
 function messageErrorSummary(message) {
   const error = message?.info?.error;
+  if (!error) {
+    return "";
+  }
+  return agentErrorSummary(error);
+}
+
+function agentErrorSummary(error) {
   if (!error) {
     return "";
   }
@@ -153,6 +157,7 @@ export class FlagDockManager {
     this.server = null;
     this.runtimes = new Map();
     this.codexClients = new Map();
+    this.openCodeObservers = new Map();
     this.activeAutoLoops = new Map();
     this.tickTimer = null;
     this.stopping = false;
@@ -233,6 +238,7 @@ export class FlagDockManager {
     if (this.tickTimer) {
       clearInterval(this.tickTimer);
     }
+    this.stopOpenCodeObservers();
     for (const runtime of this.runtimes.values()) {
       await runtime.dispose().catch(() => {});
     }
@@ -608,6 +614,94 @@ export class FlagDockManager {
     return client;
   }
 
+  openCodeObserverKey(serverUrl, sessionID) {
+    return `${serverUrl}\u0000${sessionID}`;
+  }
+
+  stopOpenCodeObservers(serverUrl = null) {
+    for (const observer of this.openCodeObservers.values()) {
+      if (!serverUrl || observer.serverUrl === serverUrl) {
+        observer.stop();
+      }
+    }
+  }
+
+  async observeOpenCodeSession(workspace, sessionID) {
+    const backendState = this.backendState(workspace, "opencode");
+    if (!backendState?.serverUrl || backendState.status !== "running" || this.stopping) {
+      return;
+    }
+    const key = this.openCodeObserverKey(backendState.serverUrl, sessionID);
+    if (this.openCodeObservers.has(key)) {
+      return;
+    }
+    const runtime = await this.getRuntime(backendState);
+    const entry = {
+      challenge: workspace.challenge,
+      serverUrl: backendState.serverUrl,
+      sessionID,
+      stop: () => {},
+    };
+    const task = (async () => {
+      let observer = null;
+      try {
+        observer = await runtime.observeSession({
+          includeSubagents: true,
+          resolveFinalResult: true,
+          sessionID,
+          untilIdle: true,
+        });
+        entry.stop = () => observer.stop();
+        for await (const event of observer.receiveResponse()) {
+          const currentWorkspace = this.state.workspaces[entry.challenge];
+          const registry = currentWorkspace ? this.sessionRegistry(currentWorkspace, "opencode", entry.sessionID) : null;
+          if (!currentWorkspace || !registry || this.stopping) {
+            observer.stop();
+            break;
+          }
+          if (event.type === "status") {
+            const nextValues = {
+              last_seen_at: nowIso(),
+            };
+            if (event.status === "busy" || event.status === "retry") {
+              nextValues.status = "active";
+            }
+            this.updateSessionRegistry(currentWorkspace, "opencode", entry.sessionID, nextValues);
+            await this.save();
+            continue;
+          }
+          if (event.type === "error") {
+            this.updateSessionRegistry(currentWorkspace, "opencode", entry.sessionID, {
+              last_error: agentErrorSummary(event.error),
+              last_seen_at: nowIso(),
+            });
+            await this.save();
+            continue;
+          }
+          if (event.type === "result") {
+            await this.syncBackendOutputs(currentWorkspace, "opencode");
+            const solved = (await this.workspaceChallengeInfo(currentWorkspace)).solutions.opencode.solved;
+            await this.reconcileSolvedBy(currentWorkspace);
+            this.updateSessionRegistry(currentWorkspace, "opencode", entry.sessionID, {
+              last_error: event.result.error ? agentErrorSummary(event.result.error) : "",
+              last_response_at: nowIso(),
+              last_seen_at: nowIso(),
+              status: solved ? "completed" : "idle",
+            });
+            await this.save();
+          }
+        }
+      } catch (error) {
+        await this.log(`observe opencode ${entry.challenge}/${entry.sessionID} failed: ${errorSummary(error)}`);
+      } finally {
+        observer?.stop();
+        this.openCodeObservers.delete(key);
+      }
+    })();
+    entry.task = task;
+    this.openCodeObservers.set(key, entry);
+  }
+
   solutionRuntimePaths(workspace, backend) {
     const backendState = this.backendState(workspace, backend);
     if (!backendState?.challengeDir) {
@@ -761,30 +855,24 @@ export class FlagDockManager {
       return Object.values(sessionCollection(backendState));
     }
     const runtime = await this.getRuntime(backendState);
-    const [sessions, statuses] = await Promise.all([
-      requireData("session.list", runtime.client.session.list({
-        directory: CONTAINER_CHALLENGE_DIR,
-        limit: 200,
-      })),
-      requireData("session.status", runtime.client.session.status({
-        directory: CONTAINER_CHALLENGE_DIR,
-      })).catch(() => ({})),
-    ]);
+    const sessions = await runtime.listSessions(200);
+    const sessionIDs = new Set(sessions.map((session) => session.sessionID));
     const solved = (await this.workspaceChallengeInfo(workspace)).solutions.opencode.solved;
     for (const session of sessions) {
-      const existing = sessionCollection(backendState)[session.id] ?? {};
+      const existing = sessionCollection(backendState)[session.sessionID] ?? {};
+      const sessionInfo = await readSessionInfo(runtime, session.sessionID).catch(() => null);
       const registry = {
         backend: "opencode",
-        session_id: session.id,
+        session_id: session.sessionID,
         challenge: workspace.challenge,
         directory: CONTAINER_CHALLENGE_DIR,
-        role: session.id === backendState.primarySessionId ? "primary" : (existing.role ?? "auxiliary"),
+        role: session.sessionID === backendState.primarySessionId ? "primary" : (existing.role ?? "auxiliary"),
         source: existing.source ?? "discovered",
         mode: existing.mode ?? "manual",
-        created_at: existing.created_at ?? new Date(session.time.created).toISOString(),
+        created_at: existing.created_at ?? new Date(session.createTime).toISOString(),
         last_seen_at: nowIso(),
-        status: normalizeSessionStatus(statuses[session.id], session, solved),
-        url: sessionUrl(backendState.attachServerUrl ?? backendState.serverUrl, session.id),
+        status: normalizeSessionStatus(session.status, solved, Boolean(sessionInfo?.time?.archived)),
+        url: sessionUrl(backendState.attachServerUrl ?? backendState.serverUrl, session.sessionID),
         title: session.title ?? "",
         last_auto_prompt_at: existing.last_auto_prompt_at,
         last_auto_prompt_kind: existing.last_auto_prompt_kind,
@@ -793,20 +881,22 @@ export class FlagDockManager {
         last_error: existing.last_error ?? "",
       };
       try {
-        const messages = await requireData("session.messages", runtime.client.session.messages({
-          sessionID: session.id,
-          directory: CONTAINER_CHALLENGE_DIR,
-          limit: 10,
-        }));
-        const latestError = [...messages].reverse().map(messageErrorSummary).find(Boolean);
-        registry.last_error = latestError ?? "";
+        if (registry.status !== "active") {
+          const messages = await listSessionMessages(runtime, session.sessionID, 10);
+          const latestError = [...messages].reverse().map(messageErrorSummary).find(Boolean);
+          registry.last_error = latestError ?? "";
+        }
       } catch {
         registry.last_error = existing.last_error ?? "";
       }
-      sessionCollection(backendState)[session.id] = registry;
+      sessionCollection(backendState)[session.sessionID] = registry;
+      if (registry.status === "active") {
+        this.observeOpenCodeSession(workspace, session.sessionID)
+          .catch((error) => this.log(`observe ${workspace.challenge}/${session.sessionID} failed: ${error.message}`));
+      }
     }
     for (const session of Object.values(sessionCollection(backendState))) {
-      if (!sessions.some((item) => item.id === session.session_id) && session.status !== "closed") {
+      if (!sessionIDs.has(session.session_id) && session.status !== "closed") {
         session.status = "unknown";
       }
     }
@@ -1222,6 +1312,9 @@ export class FlagDockManager {
   async disposeBackendRuntime(backendState) {
     if (!backendState) {
       return;
+    }
+    if (backendState.serverUrl) {
+      this.stopOpenCodeObservers(backendState.serverUrl);
     }
     if (backendState.serverUrl && this.runtimes.has(backendState.serverUrl)) {
       const runtime = this.runtimes.get(backendState.serverUrl);
