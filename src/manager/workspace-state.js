@@ -1,8 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { DEFAULT_MANAGER_HOST, SOLUTION_FLAG_FILE, SOLUTION_WRITEUP_FILE } from "../constants.js";
-import { CodexAppClient, codexHttpUrl, codexWsUrl, waitForCodex } from "../codex.js";
-import { buildWorkspaceUrls, loadFlagDockConfig } from "../config.js";
+import { SOLUTION_FLAG_FILE, SOLUTION_WRITEUP_FILE } from "../constants.js";
+import { loadFlagDockConfig } from "../config.js";
 import {
   backendChallengeDir,
   backendContainerName,
@@ -10,13 +9,11 @@ import {
   containerStatus,
   ensureImages,
   inspectContainer,
-  startCodexWorkspaceContainer,
-  startWorkspaceContainer,
 } from "../docker.js";
-import { createAttachedRuntime, waitForOpenCode } from "../opencode.js";
 import { ensureAgentRuntimeFiles } from "../prompts.js";
 import { ensureDir, nonEmptyFile, nowIso } from "../util.js";
-import { backendPort, emptyBackendState, sessionCollection, validateBackend } from "./helpers.js";
+import { backendAdapter } from "./backends/index.js";
+import { emptyBackendState, sessionCollection, validateBackend } from "./helpers.js";
 
 export const workspaceStateMethods = {
   getWorkspace(challenge) {
@@ -124,6 +121,7 @@ export const workspaceStateMethods = {
       return;
     }
     const resolvedConfig = config ?? await loadFlagDockConfig();
+    const adapter = backendAdapter(backend);
     const inspected = await inspectContainer(backendState.containerName ?? backendContainerName(workspace.challenge, backend));
     backendState.challengeDir ??= backendChallengeDir(workspace.challenge, backend);
     backendState.containerName ??= backendContainerName(workspace.challenge, backend);
@@ -137,20 +135,10 @@ export const workspaceStateMethods = {
       return;
     }
     backendState.status = containerStatus(inspected) ?? "available";
-    const hostPort = containerHostPort(inspected, backendPort(backend));
+    const hostPort = containerHostPort(inspected, adapter.port);
     if (hostPort) {
       backendState.hostPort = hostPort;
-      if (backend === "codex") {
-        const bindHost = resolvedConfig.workspace.bindHost;
-        const internalHost = bindHost === "0.0.0.0" ? DEFAULT_MANAGER_HOST : bindHost;
-        backendState.serverUrl = codexHttpUrl(internalHost, hostPort);
-        backendState.wsUrl = codexWsUrl(internalHost, hostPort);
-        backendState.attachServerUrl = codexHttpUrl(resolvedConfig.attach.host, hostPort);
-      } else {
-        const urls = buildWorkspaceUrls(resolvedConfig, hostPort);
-        backendState.serverUrl = urls.serverUrl;
-        backendState.attachServerUrl = urls.attachServerUrl;
-      }
+      Object.assign(backendState, adapter.urls(resolvedConfig, hostPort));
     }
     backendState.updatedAt = nowIso();
   },
@@ -205,82 +193,21 @@ export const workspaceStateMethods = {
 
   async ensureBackendWorkspace(workspace, backend, info, config) {
     const backendState = this.ensureBackendState(workspace, backend);
-    if (backend === "codex") {
-      const container = await startCodexWorkspaceContainer({
-        bindHost: config.workspace.bindHost,
-        challenge: workspace.challenge,
-        challengeDir: info.dir,
-        log: (message) => this.log(message),
-      });
-      const bindHost = config.workspace.bindHost;
-      const internalHost = bindHost === "0.0.0.0" ? DEFAULT_MANAGER_HOST : bindHost;
-      Object.assign(backendState, {
-        ...container,
-        backend,
-        challenge: workspace.challenge,
-        challengeDir: container.challengeDir,
-        sessions: sessionCollection(backendState),
-        serverUrl: codexHttpUrl(internalHost, container.hostPort),
-        wsUrl: codexWsUrl(internalHost, container.hostPort),
-        attachServerUrl: codexHttpUrl(config.attach.host, container.hostPort),
-        updatedAt: nowIso(),
-      });
-      workspace.updatedAt = nowIso();
-      await this.save();
-      await waitForCodex(backendState.serverUrl);
-      await this.getCodexClient(backendState);
-      return backendState;
-    }
-
-    const container = await startWorkspaceContainer({
-      bindHost: config.workspace.bindHost,
-      challenge: workspace.challenge,
-      challengeDir: info.dir,
-      log: (message) => this.log(message),
-    });
-    const urls = buildWorkspaceUrls(config, container.hostPort);
+    const adapter = backendAdapter(backend);
+    const container = await adapter.startContainer(this, workspace, info, config);
     Object.assign(backendState, {
       ...container,
       backend,
       challenge: workspace.challenge,
       challengeDir: container.challengeDir,
       sessions: sessionCollection(backendState),
-      serverUrl: urls.serverUrl,
-      attachServerUrl: urls.attachServerUrl,
+      ...adapter.urls(config, container.hostPort),
       updatedAt: nowIso(),
     });
     workspace.updatedAt = nowIso();
     await this.save();
-    await this.getRuntime(backendState);
+    await adapter.waitUntilReady(this, backendState);
     return backendState;
-  },
-
-  async getRuntime(backendState) {
-    if (!backendState?.serverUrl) {
-      throw new Error("OpenCode backend has no server URL");
-    }
-    const cached = this.runtimes.get(backendState.serverUrl);
-    if (cached) {
-      return cached;
-    }
-    const runtime = await waitForOpenCode(() => createAttachedRuntime(backendState.serverUrl));
-    this.runtimes.set(backendState.serverUrl, runtime);
-    return runtime;
-  },
-
-  async getCodexClient(backendState) {
-    if (!backendState?.wsUrl) {
-      throw new Error("Codex backend has no WebSocket URL");
-    }
-    const cached = this.codexClients.get(backendState.wsUrl);
-    if (cached) {
-      await cached.connect();
-      return cached;
-    }
-    const client = new CodexAppClient(backendState.wsUrl);
-    await client.connect();
-    this.codexClients.set(backendState.wsUrl, client);
-    return client;
   },
 
   solutionRuntimePaths(workspace, backend) {

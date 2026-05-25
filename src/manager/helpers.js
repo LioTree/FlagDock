@@ -1,4 +1,4 @@
-import { BACKENDS, CODEX_PORT, CONTAINER_CHALLENGE_DIR, OPENCODE_PORT } from "../constants.js";
+import { BACKENDS, CONTAINER_CHALLENGE_DIR } from "../constants.js";
 import { attachDirectorySegment, nowIso } from "../util.js";
 
 export const DEFAULT_MODE = "auto";
@@ -23,10 +23,6 @@ export function validateBackend(backend) {
 
 export function configuredBackends(mode) {
   return mode === "race" ? [...BACKENDS] : [validateBackend(mode)];
-}
-
-export function backendPort(backend) {
-  return backend === "codex" ? CODEX_PORT : OPENCODE_PORT;
 }
 
 export function normalizeSessionStatus(status, solved, archived = false) {
@@ -60,10 +56,6 @@ export function normalizeCodexThreadStatus(status, solved) {
 
 export function sessionUrl(baseUrl, sessionID) {
   return `${baseUrl}/${attachDirectorySegment(CONTAINER_CHALLENGE_DIR)}/session/${sessionID}`;
-}
-
-export function codexAttachSessionName(sessionID) {
-  return `codex-${sessionID.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48)}`;
 }
 
 export function shellQuote(value) {

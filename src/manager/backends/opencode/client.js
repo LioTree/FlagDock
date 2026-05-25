@@ -1,5 +1,5 @@
 import { createAgentRuntime } from "@liontree/opencode-agent-sdk";
-import { AGENT_NAME, CONTAINER_CHALLENGE_DIR } from "./constants.js";
+import { AGENT_NAME, CONTAINER_CHALLENGE_DIR } from "../../../constants.js";
 
 export async function requireData(label, promise) {
   const response = await promise;

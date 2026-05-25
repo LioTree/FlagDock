@@ -1,24 +1,22 @@
 import http from "node:http";
-import { DEFAULT_MANAGER_HOST, LOG_PATH } from "./constants.js";
-import { getChallengeInfo, getChallengeInfoAtPath, scanChallenges } from "./challenges.js";
-import { loadFlagDockConfig } from "./config.js";
-import { ensureAgentRuntimeFiles } from "./prompts.js";
-import { loadState, saveDaemonInfo, saveState } from "./state.js";
-import { appendText, nowIso } from "./util.js";
-import { autoMethods } from "./manager/auto.js";
-import { httpMethods } from "./manager/http.js";
-import { sessionMethods } from "./manager/sessions.js";
-import { workspaceActionMethods } from "./manager/workspace-actions.js";
-import { workspaceStateMethods } from "./manager/workspace-state.js";
+import { DEFAULT_MANAGER_HOST, LOG_PATH } from "../constants.js";
+import { getChallengeInfo, getChallengeInfoAtPath, scanChallenges } from "../challenges.js";
+import { loadFlagDockConfig } from "../config.js";
+import { ensureAgentRuntimeFiles } from "../prompts.js";
+import { loadState, saveDaemonInfo, saveState } from "../state.js";
+import { appendText, nowIso } from "../util.js";
+import { disposeBackendAdapters } from "./backends/index.js";
+import { autoMethods } from "./auto.js";
+import { httpMethods } from "./http.js";
+import { sessionMethods } from "./sessions.js";
+import { workspaceActionMethods } from "./workspace-actions.js";
+import { workspaceStateMethods } from "./workspace-state.js";
 
 export class FlagDockManager {
   constructor() {
     this.state = null;
     this.startedAt = nowIso();
     this.server = null;
-    this.runtimes = new Map();
-    this.codexClients = new Map();
-    this.openCodeObservers = new Map();
     this.activeAutoLoops = new Map();
     this.tickTimer = null;
     this.stopping = false;
@@ -99,13 +97,7 @@ export class FlagDockManager {
     if (this.tickTimer) {
       clearInterval(this.tickTimer);
     }
-    this.stopOpenCodeObservers();
-    for (const runtime of this.runtimes.values()) {
-      await runtime.dispose().catch(() => {});
-    }
-    for (const client of this.codexClients.values()) {
-      client.dispose();
-    }
+    await disposeBackendAdapters(this);
     await this.save();
     if (this.server) {
       await new Promise((resolve) => this.server.close(resolve));

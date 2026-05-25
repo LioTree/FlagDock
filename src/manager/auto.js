@@ -1,7 +1,5 @@
-import { AGENT_NAME } from "../constants.js";
-import { defaultSessionOptions } from "../opencode.js";
-import { readSessionPrompt } from "../prompts.js";
 import { nowIso, sleep } from "../util.js";
+import { backendAdapter } from "./backends/index.js";
 import { AUTO_ERROR_BACKOFF_MS, errorSummary } from "./helpers.js";
 
 export const autoMethods = {
@@ -29,54 +27,8 @@ export const autoMethods = {
     return changed;
   },
 
-  async interruptOpenCodeSession(workspace, sessionID) {
-    const backendState = this.backendState(workspace, "opencode");
-    if (!backendState) {
-      return false;
-    }
-    const runtime = await this.getRuntime(backendState);
-    const session = await runtime.openSession(sessionID, defaultSessionOptions());
-    await session.interrupt();
-    return true;
-  },
-
-  async activeCodexTurnID(workspace, session) {
-    if (session.active_turn_id) {
-      return session.active_turn_id;
-    }
-    const backendState = this.backendState(workspace, "codex");
-    if (!backendState) {
-      return null;
-    }
-    const client = await this.getCodexClient(backendState);
-    const thread = await client.readThread(session.thread_id);
-    const activeTurn = [...(thread?.turns ?? [])].reverse().find((turn) => turn?.status === "inProgress" || turn?.status === "active");
-    if (!activeTurn?.id) {
-      return null;
-    }
-    session.active_turn_id = activeTurn.id;
-    return activeTurn.id;
-  },
-
-  async interruptCodexSession(workspace, session) {
-    const backendState = this.backendState(workspace, "codex");
-    if (!backendState) {
-      return false;
-    }
-    const turnID = await this.activeCodexTurnID(workspace, session);
-    if (!turnID) {
-      return false;
-    }
-    const client = await this.getCodexClient(backendState);
-    await client.interruptTurn(session.thread_id, turnID);
-    return true;
-  },
-
   async interruptAutoSession(workspace, backend, session) {
-    if (backend === "codex") {
-      return this.interruptCodexSession(workspace, session);
-    }
-    return this.interruptOpenCodeSession(workspace, session.session_id);
+    return backendAdapter(backend).interruptSession(this, workspace, session);
   },
 
   async dispatchSolvedWorkspace(workspace) {
@@ -124,84 +76,8 @@ export const autoMethods = {
     this.activeAutoLoops.set(key, task);
   },
 
-  async sendOpenCodeAutoPromptTurn(workspace, sessionID, kind) {
-    const backendState = this.backendState(workspace, "opencode");
-    const runtime = await this.getRuntime(backendState);
-    const session = await runtime.openSession(sessionID, { agent: AGENT_NAME });
-    const promptKind = this.promptKind(kind);
-    const prompt = await readSessionPrompt(promptKind);
-    const current = this.sessionRegistry(workspace, "opencode", sessionID);
-    this.updateSessionRegistry(workspace, "opencode", sessionID, {
-      last_auto_prompt_at: nowIso(),
-      last_auto_prompt_kind: promptKind,
-      status: "active",
-      ...(promptKind === "writeup" ? { writeup_prompt_sent_at: current?.writeup_prompt_sent_at ?? nowIso() } : {}),
-    });
-    await this.save();
-    await this.log(`sending ${promptKind} prompt to opencode ${workspace.challenge}/${sessionID}`);
-    const result = await session.runAgent(prompt, { agent: AGENT_NAME });
-    if (result?.error) {
-      throw new Error(`agent turn failed: ${errorSummary(result.error)}`);
-    }
-    await this.syncBackendOutputs(workspace, "opencode");
-    const solved = (await this.workspaceChallengeInfo(workspace)).solved;
-    await this.reconcileSolvedBy(workspace);
-    this.updateSessionRegistry(workspace, "opencode", sessionID, {
-      last_response_at: nowIso(),
-      last_error: "",
-      status: solved ? "completed" : "idle",
-    });
-    await this.save();
-    await this.syncOpenCodeSessions(workspace).catch((error) => this.log(`sync ${workspace.challenge} after ${promptKind} failed: ${error.message}`));
-  },
-
-  async sendCodexAutoPromptTurn(workspace, sessionID, kind) {
-    const backendState = this.backendState(workspace, "codex");
-    const session = this.sessionRegistry(workspace, "codex", sessionID);
-    if (!backendState || !session) {
-      throw new Error(`Codex session ${sessionID} not found`);
-    }
-    const client = await this.getCodexClient(backendState);
-    if (session.last_auto_prompt_at) {
-      await client.resumeThread(session.thread_id);
-    }
-    const promptKind = this.promptKind(kind);
-    const prompt = await readSessionPrompt(promptKind);
-    this.updateSessionRegistry(workspace, "codex", sessionID, {
-      last_auto_prompt_at: nowIso(),
-      last_auto_prompt_kind: promptKind,
-      status: "active",
-      ...(promptKind === "writeup" ? { writeup_prompt_sent_at: session.writeup_prompt_sent_at ?? nowIso() } : {}),
-    });
-    await this.save();
-    await this.log(`sending ${promptKind} prompt to codex ${workspace.challenge}/${sessionID}`);
-    const pendingTurn = await client.startTurn(session.thread_id, prompt);
-    this.updateSessionRegistry(workspace, "codex", sessionID, {
-      active_turn_id: pendingTurn.id,
-    });
-    await this.save();
-    const turn = await client.waitForTurn(session.thread_id, pendingTurn.id);
-    if (turn.status === "failed") {
-      throw new Error(`codex turn failed: ${errorSummary(turn.error)}`);
-    }
-    await this.syncBackendOutputs(workspace, "codex");
-    const solved = (await this.workspaceChallengeInfo(workspace)).solved;
-    await this.reconcileSolvedBy(workspace);
-    this.updateSessionRegistry(workspace, "codex", sessionID, {
-      active_turn_id: "",
-      last_response_at: nowIso(),
-      last_error: "",
-      status: solved ? "completed" : "idle",
-    });
-    await this.save();
-    await this.syncCodexSessions(workspace).catch((error) => this.log(`sync codex ${workspace.challenge} after ${promptKind} failed: ${error.message}`));
-  },
-
   async sendAutoPromptTurn(workspace, sessionID, kind, backend) {
-    if (backend === "codex") {
-      return this.sendCodexAutoPromptTurn(workspace, sessionID, kind);
-    }
-    return this.sendOpenCodeAutoPromptTurn(workspace, sessionID, kind);
+    return backendAdapter(backend).sendAutoPromptTurn(this, workspace, sessionID, kind);
   },
 
   async runAutoSessionLoop(challenge, sessionID, initialKind, backend) {

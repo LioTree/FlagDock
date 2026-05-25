@@ -8,8 +8,8 @@ import {
   removeWorkspaceContainer,
   stopWorkspaceContainer,
 } from "../docker.js";
-import { defaultSessionOptions } from "../opencode.js";
 import { nowIso, pathExists } from "../util.js";
+import { backendAdapter } from "./backends/index.js";
 import { configuredBackends, validateMode } from "./helpers.js";
 
 export const workspaceActionMethods = {
@@ -62,22 +62,7 @@ export const workspaceActionMethods = {
     const selectedMode = validateMode(mode, "auto");
     const selectedBackend = await this.resolveActionBackend(backend);
     const { workspace } = await this.prepareChallengeBackends(challenge, [selectedBackend]);
-    let registry;
-    if (selectedBackend === "codex") {
-      const client = await this.getCodexClient(this.backendState(workspace, "codex"));
-      const thread = await client.startThread();
-      registry = this.registerCodexSession(workspace, thread, {
-        role: "auxiliary",
-        mode: selectedMode,
-      });
-    } else {
-      const runtime = await this.getRuntime(this.backendState(workspace, "opencode"));
-      const session = await runtime.createSession(defaultSessionOptions());
-      registry = this.registerOpenCodeSession(workspace, session.id, {
-        role: "auxiliary",
-        mode: selectedMode,
-      });
-    }
+    const registry = await backendAdapter(selectedBackend).createSession(this, workspace, selectedMode);
     await this.save();
     if (selectedMode === "auto") {
       this.driveSession(workspace.challenge, registry.session_id, "initial", selectedBackend)
@@ -120,7 +105,7 @@ export const workspaceActionMethods = {
       if (backendState) {
         backendState.status = "stopped";
         backendState.updatedAt = nowIso();
-        await this.disposeBackendRuntime(backendState);
+        await this.disposeBackendRuntime(backendState, backend);
       }
     }
     workspace.updatedAt = nowIso();
@@ -142,7 +127,7 @@ export const workspaceActionMethods = {
     for (const backend of BACKENDS) {
       results[backend] = await removeWorkspaceContainer(challenge, backend);
       await removeBackendWorkspaceDir(challenge, backend).catch(() => {});
-      await this.disposeBackendRuntime(workspace?.backends?.[backend]);
+      await this.disposeBackendRuntime(workspace?.backends?.[backend], backend);
     }
     await removeChallengeWorkspaceDirIfEmpty(challenge).catch(() => {});
     delete this.state.workspaces[challenge];

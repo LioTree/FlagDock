@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
-import { CODEX_PORT, CONTAINER_CHALLENGE_DIR } from "./constants.js";
-import { sleep } from "./util.js";
+import { CODEX_PORT, CONTAINER_CHALLENGE_DIR } from "../../../constants.js";
+import { sleep } from "../../../util.js";
 
 const REQUEST_TIMEOUT_MS = 30000;
 const TURN_TIMEOUT_MS = 30 * 60 * 1000;
