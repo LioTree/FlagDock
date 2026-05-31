@@ -20,8 +20,8 @@ export function managedSessionFields(backend, workspace, existing, { role, mode,
   };
 }
 
-export async function ensurePrimarySession(manager, workspace, backend, mode, createPrimary) {
-  const backendState = manager.ensureBackendState(workspace, backend);
+export async function ensurePrimarySession(workspaceRuntime, workspace, backend, mode, createPrimary) {
+  const backendState = workspaceRuntime.ensureBackendState(workspace, backend);
   let primary = backendState.primarySessionId ? sessionCollection(backendState)[backendState.primarySessionId] : null;
   if (!primary) {
     primary = await createPrimary(backendState);

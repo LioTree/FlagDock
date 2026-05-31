@@ -1,16 +1,46 @@
 import http from "node:http";
 import { DEFAULT_MANAGER_HOST, LOG_PATH } from "../constants.js";
-import { getChallengeInfo, getChallengeInfoAtPath, scanChallenges } from "../challenges.js";
-import { loadFlagDockConfig } from "../config.js";
 import { ensureAgentRuntimeFiles } from "../prompts.js";
 import { loadState, saveDaemonInfo, saveState } from "../state.js";
 import { appendText, nowIso } from "../util.js";
 import { disposeBackendAdapters } from "./backends/index.js";
-import { autoMethods } from "./auto.js";
-import { httpMethods } from "./http.js";
-import { sessionMethods } from "./sessions.js";
-import { workspaceActionMethods } from "./workspace-actions.js";
-import { workspaceStateMethods } from "./workspace-state.js";
+import { createHttpController } from "./http.js";
+import { createAutoService } from "./services/auto.js";
+import { createSessionService } from "./services/sessions.js";
+import { createWorkspaceActionService } from "./services/workspace-actions.js";
+import { createWorkspaceRuntimeService } from "./services/workspace-runtime.js";
+
+function createManagerContext(manager) {
+  return {
+    get state() {
+      return manager.state;
+    },
+    set state(value) {
+      manager.state = value;
+    },
+    get startedAt() {
+      return manager.startedAt;
+    },
+    get stopping() {
+      return manager.stopping;
+    },
+    set stopping(value) {
+      manager.stopping = value;
+    },
+    get activeAutoLoops() {
+      return manager.activeAutoLoops;
+    },
+    async load() {
+      manager.state = await loadState();
+    },
+    async save() {
+      await saveState(manager.state);
+    },
+    async log(message) {
+      await appendText(LOG_PATH, `[${nowIso()}] ${message}\n`).catch(() => {});
+    },
+  };
+}
 
 export class FlagDockManager {
   constructor() {
@@ -20,43 +50,33 @@ export class FlagDockManager {
     this.activeAutoLoops = new Map();
     this.tickTimer = null;
     this.stopping = false;
+
+    this.context = createManagerContext(this);
+    const workspaceRuntime = createWorkspaceRuntimeService(this.context);
+    const sessions = createSessionService(this.context, { workspaceRuntime });
+    const auto = createAutoService(this.context, { workspaceRuntime, sessions });
+    const actions = createWorkspaceActionService(this.context, { workspaceRuntime, sessions, auto });
+
+    this.services = {
+      workspaceRuntime,
+      sessions,
+      auto,
+      actions,
+    };
+
+    this.http = createHttpController(this.services, () => this.close());
   }
 
   async log(message) {
-    await appendText(LOG_PATH, `[${nowIso()}] ${message}\n`).catch(() => {});
+    await this.context.log(message);
   }
 
   async load() {
-    this.state = await loadState();
-  }
-
-  async configuredChallengeInfo(challenge, config = null) {
-    const resolvedConfig = config ?? await loadFlagDockConfig();
-    return getChallengeInfo(challenge, resolvedConfig.workspace.challengesDir);
-  }
-
-  async workspaceChallengeInfo(workspace, config = null) {
-    if (workspace?.sourceDir) {
-      return getChallengeInfoAtPath(workspace.challenge, workspace.sourceDir);
-    }
-    return this.configuredChallengeInfo(workspace.challenge, config);
-  }
-
-  async challengeInfoForAction(challenge, config = null) {
-    const workspace = this.state.workspaces[challenge];
-    if (workspace) {
-      return this.workspaceChallengeInfo(workspace, config);
-    }
-    return this.configuredChallengeInfo(challenge, config);
-  }
-
-  async configuredChallengeList(config = null) {
-    const resolvedConfig = config ?? await loadFlagDockConfig();
-    return scanChallenges(resolvedConfig.workspace.challengesDir, this.state.workspaces);
+    await this.context.load();
   }
 
   async save() {
-    await saveState(this.state);
+    await this.context.save();
   }
 
   async listen(port = 0) {
@@ -64,8 +84,8 @@ export class FlagDockManager {
     await ensureAgentRuntimeFiles();
 
     this.server = http.createServer((request, response) => {
-      this.handleRequest(request, response).catch((error) => {
-        this.writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) });
+      this.http.handleRequest(request, response).catch((error) => {
+        this.http.writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) });
       });
     });
 
@@ -87,9 +107,9 @@ export class FlagDockManager {
 
   startTicks() {
     this.tickTimer = setInterval(() => {
-      this.tick().catch((error) => this.log(`tick failed: ${error.message}`));
+      this.services.auto.tick().catch((error) => this.log(`tick failed: ${error.message}`));
     }, 30000);
-    this.tick().catch((error) => this.log(`initial tick failed: ${error.message}`));
+    this.services.auto.tick().catch((error) => this.log(`initial tick failed: ${error.message}`));
   }
 
   async close() {
@@ -97,32 +117,12 @@ export class FlagDockManager {
     if (this.tickTimer) {
       clearInterval(this.tickTimer);
     }
-    await disposeBackendAdapters(this);
+    await disposeBackendAdapters(this.context);
     await this.save();
     if (this.server) {
       await new Promise((resolve) => this.server.close(resolve));
     }
   }
-}
-
-function installManagerMethods(methods) {
-  Object.defineProperties(
-    FlagDockManager.prototype,
-    Object.fromEntries(
-      Object.entries(methods).map(([name, value]) => [
-        name,
-        {
-          value,
-          writable: true,
-          configurable: true,
-        },
-      ]),
-    ),
-  );
-}
-
-for (const methods of [workspaceStateMethods, sessionMethods, workspaceActionMethods, autoMethods, httpMethods]) {
-  installManagerMethods(methods);
 }
 
 export async function runManager() {

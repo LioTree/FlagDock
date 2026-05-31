@@ -1,26 +1,31 @@
 import fs from "node:fs/promises";
-import { BACKENDS } from "../constants.js";
-import { getChallengeInfoAtPath, removeChallengeSolutionStateDirIfEmpty } from "../challenges.js";
-import { loadFlagDockConfig } from "../config.js";
+import { BACKENDS } from "../../constants.js";
+import { getChallengeInfoAtPath, removeChallengeSolutionStateDirIfEmpty } from "../../challenges.js";
+import { loadFlagDockConfig } from "../../config.js";
 import {
   removeBackendWorkspaceDir,
   removeChallengeWorkspaceDirIfEmpty,
   removeWorkspaceContainer,
   stopWorkspaceContainer,
-} from "../docker.js";
-import { nowIso, pathExists } from "../util.js";
-import { backendAdapter } from "./backends/index.js";
-import { configuredBackends, validateMode } from "./helpers.js";
+} from "../../docker.js";
+import { nowIso, pathExists } from "../../util.js";
+import { backendAdapter } from "../backends/index.js";
+import { configuredBackends, validateMode } from "../helpers.js";
 
-export const workspaceActionMethods = {
-  async startChallenge({ challenge, mode, force }) {
+export function createWorkspaceActionService(ctx, { workspaceRuntime, sessions, auto }) {
+  const backendServices = {
+    workspaceRuntime,
+    sessions,
+  };
+
+  async function startChallenge({ challenge, mode, force }) {
     if (force) {
       throw new Error("force start is not supported");
     }
     const selectedMode = validateMode(mode);
     const config = await loadFlagDockConfig();
     const backends = configuredBackends(config.backend.mode);
-    const info = await this.configuredChallengeInfo(challenge, config);
+    const info = await workspaceRuntime.configuredChallengeInfo(challenge, config);
     if (!info.valid) {
       throw new Error(`Challenge ${challenge} is invalid or missing challenge.md`);
     }
@@ -33,117 +38,117 @@ export const workspaceActionMethods = {
       };
     }
 
-    const { workspace } = await this.prepareChallengeBackends(challenge, backends);
+    const { workspace } = await workspaceRuntime.prepareChallengeBackends(challenge, backends);
     const primaries = {};
     for (const backend of backends) {
-      await this.syncBackendOutputs(workspace, backend);
-      await this.syncSessions(workspace, backend);
-      primaries[backend] = await this.ensurePrimarySession(workspace, backend, selectedMode);
+      await workspaceRuntime.syncBackendOutputs(workspace, backend);
+      await sessions.syncSessions(workspace, backend);
+      primaries[backend] = await sessions.ensurePrimarySession(workspace, backend, selectedMode);
     }
-    await this.reconcileSolvedBy(workspace);
-    await this.save();
+    await workspaceRuntime.reconcileSolvedBy(workspace);
+    await ctx.save();
     if (selectedMode === "auto") {
       for (const backend of backends) {
-        this.driveSession(workspace.challenge, primaries[backend].session_id, "initial", backend)
-          .catch((error) => this.log(`${backend} drive failed: ${error.message}`));
+        auto.driveSession(workspace.challenge, primaries[backend].session_id, "initial", backend)
+          .catch((error) => ctx.log(`${backend} drive failed: ${error.message}`));
       }
     }
     const firstBackend = backends[0];
     return {
-      workspace: this.workspaceSummary(workspace, await this.workspaceChallengeInfo(workspace)),
+      workspace: workspaceRuntime.workspaceSummary(workspace, await workspaceRuntime.workspaceChallengeInfo(workspace)),
       backend_mode: config.backend.mode,
       primary_session: primaries[firstBackend],
       opencode_primary_session: primaries.opencode,
       codex_primary_session: primaries.codex,
     };
-  },
+  }
 
-  async newSession({ challenge, mode, backend }) {
+  async function newSession({ challenge, mode, backend }) {
     const selectedMode = validateMode(mode, "auto");
-    const selectedBackend = await this.resolveActionBackend(backend);
-    const { workspace } = await this.prepareChallengeBackends(challenge, [selectedBackend]);
-    const registry = await backendAdapter(selectedBackend).createSession(this, workspace, selectedMode);
-    await this.save();
+    const selectedBackend = await workspaceRuntime.resolveActionBackend(backend);
+    const { workspace } = await workspaceRuntime.prepareChallengeBackends(challenge, [selectedBackend]);
+    const registry = await backendAdapter(selectedBackend).createSession(ctx, backendServices, workspace, selectedMode);
+    await ctx.save();
     if (selectedMode === "auto") {
-      this.driveSession(workspace.challenge, registry.session_id, "initial", selectedBackend)
-        .catch((error) => this.log(`${selectedBackend} drive failed: ${error.message}`));
+      auto.driveSession(workspace.challenge, registry.session_id, "initial", selectedBackend)
+        .catch((error) => ctx.log(`${selectedBackend} drive failed: ${error.message}`));
     }
     return { session: registry };
-  },
+  }
 
-  async setMode({ challenge, session, mode, backend }) {
+  async function setMode({ challenge, session, mode, backend }) {
     const selectedMode = validateMode(mode);
-    const selectedBackend = await this.resolveActionBackend(backend);
-    const workspace = this.state.workspaces[challenge];
+    const selectedBackend = await workspaceRuntime.resolveActionBackend(backend);
+    const workspace = ctx.state.workspaces[challenge];
     if (!workspace) {
       throw new Error(`Workspace ${challenge} does not exist`);
     }
-    await this.syncSessions(workspace, selectedBackend);
-    const registry = this.sessionRegistry(workspace, selectedBackend, session);
+    await sessions.syncSessions(workspace, selectedBackend);
+    const registry = sessions.sessionRegistry(workspace, selectedBackend, session);
     if (!registry) {
       throw new Error(`Session ${session} not found`);
     }
     registry.mode = selectedMode;
-    await this.save();
+    await ctx.save();
     if (selectedMode === "auto") {
       const kind = registry.last_auto_prompt_at ? "continue" : "initial";
-      this.driveSession(workspace.challenge, registry.session_id, kind, selectedBackend)
-        .catch((error) => this.log(`${selectedBackend} drive failed: ${error.message}`));
+      auto.driveSession(workspace.challenge, registry.session_id, kind, selectedBackend)
+        .catch((error) => ctx.log(`${selectedBackend} drive failed: ${error.message}`));
     }
     return { session: registry };
-  },
+  }
 
-  async stopWorkspace({ challenge }) {
+  async function stopWorkspace({ challenge }) {
     if (!challenge) {
       throw new Error("challenge is required");
     }
-    const workspace = this.state.workspaces[challenge] ?? this.getWorkspace(challenge);
+    const workspace = ctx.state.workspaces[challenge] ?? workspaceRuntime.getWorkspace(challenge);
     const results = {};
     for (const backend of BACKENDS) {
       results[backend] = await stopWorkspaceContainer(challenge, backend);
-      const backendState = this.backendState(workspace, backend);
-      if (backendState) {
-        backendState.status = "stopped";
-        backendState.updatedAt = nowIso();
-        await this.disposeBackendRuntime(backendState, backend);
+      const state = workspaceRuntime.backendState(workspace, backend);
+      if (state) {
+        state.status = "stopped";
+        state.updatedAt = nowIso();
+        await sessions.disposeBackendRuntime(state, backend);
       }
     }
     workspace.updatedAt = nowIso();
-    await this.save();
+    await ctx.save();
     return {
       stopped: Object.values(results).some(Boolean),
       opencode_stopped: results.opencode,
       codex_stopped: results.codex,
-      workspace: this.workspaceSummary(workspace, await this.workspaceChallengeInfo(workspace)),
+      workspace: workspaceRuntime.workspaceSummary(workspace, await workspaceRuntime.workspaceChallengeInfo(workspace)),
     };
-  },
+  }
 
-  async removeWorkspace({ challenge }) {
+  async function removeWorkspace({ challenge }) {
     if (!challenge) {
       throw new Error("challenge is required");
     }
-    const workspace = this.state.workspaces[challenge];
+    const workspace = ctx.state.workspaces[challenge];
     const results = {};
     for (const backend of BACKENDS) {
       results[backend] = await removeWorkspaceContainer(challenge, backend);
       await removeBackendWorkspaceDir(challenge, backend).catch(() => {});
-      await this.disposeBackendRuntime(workspace?.backends?.[backend], backend);
+      await sessions.disposeBackendRuntime(workspace?.backends?.[backend], backend);
     }
     await removeChallengeWorkspaceDirIfEmpty(challenge).catch(() => {});
-    delete this.state.workspaces[challenge];
-    await this.save();
+    delete ctx.state.workspaces[challenge];
+    await ctx.save();
     return {
       removed: Object.values(results).some(Boolean),
       opencode_removed: results.opencode,
       codex_removed: results.codex,
     };
-  },
+  }
 
-  async resetChallenge({ challenge }) {
+  async function resetChallenge({ challenge }) {
     if (!challenge) {
       throw new Error("challenge is required");
     }
-    const info = await this.challengeInfoForAction(challenge);
+    const info = await workspaceRuntime.challengeInfoForAction(challenge);
     if (!info.valid) {
       throw new Error(`Challenge ${challenge} is invalid or missing challenge.md`);
     }
@@ -159,8 +164,8 @@ export const workspaceActionMethods = {
     }
     await removeChallengeSolutionStateDirIfEmpty(challenge, info.dir).catch(() => {});
 
-    const hadWorkspace = Boolean(this.state.workspaces[challenge]);
-    const workspaceResult = await this.removeWorkspace({ challenge });
+    const hadWorkspace = Boolean(ctx.state.workspaces[challenge]);
+    const workspaceResult = await removeWorkspace({ challenge });
     const refreshed = await getChallengeInfoAtPath(challenge, info.dir);
     return {
       reset: true,
@@ -170,12 +175,12 @@ export const workspaceActionMethods = {
       codex_state_removed: solutionRemoved.codex,
       workspace_removed: hadWorkspace || workspaceResult.removed,
     };
-  },
+  }
 
-  async startAllChallenges({ mode } = {}) {
+  async function startAllChallenges({ mode } = {}) {
     const config = await loadFlagDockConfig();
-    await this.refreshWorkspaceContainerStates(config);
-    const challenges = await this.configuredChallengeList(config);
+    await workspaceRuntime.refreshWorkspaceContainerStates(config);
+    const challenges = await workspaceRuntime.configuredChallengeList(config);
     const results = [];
     let started = 0;
     let skipped = 0;
@@ -192,7 +197,7 @@ export const workspaceActionMethods = {
         continue;
       }
       try {
-        const result = await this.startChallenge({ challenge: item.challenge, mode });
+        const result = await startChallenge({ challenge: item.challenge, mode });
         if (result.skipped) {
           results.push({
             challenge: item.challenge,
@@ -227,12 +232,12 @@ export const workspaceActionMethods = {
       failed,
       challenges: results,
     };
-  },
+  }
 
-  async resetAllChallenges() {
+  async function resetAllChallenges() {
     const config = await loadFlagDockConfig();
-    await this.refreshWorkspaceContainerStates(config);
-    const challenges = await this.configuredChallengeList(config);
+    await workspaceRuntime.refreshWorkspaceContainerStates(config);
+    const challenges = await workspaceRuntime.configuredChallengeList(config);
     const results = [];
     let reset = 0;
     let unchanged = 0;
@@ -250,7 +255,7 @@ export const workspaceActionMethods = {
         continue;
       }
       try {
-        const result = await this.resetChallenge({ challenge: item.challenge });
+        const result = await resetChallenge({ challenge: item.challenge });
         const changed = result.workspace_removed || result.opencode_state_removed || result.codex_state_removed;
         results.push({
           challenge: item.challenge,
@@ -281,12 +286,12 @@ export const workspaceActionMethods = {
       failed,
       challenges: results,
     };
-  },
+  }
 
-  async stopAllWorkspaces() {
+  async function stopAllWorkspaces() {
     const results = [];
-    for (const challenge of Object.keys(this.state.workspaces).sort()) {
-      const result = await this.stopWorkspace({ challenge });
+    for (const challenge of Object.keys(ctx.state.workspaces).sort()) {
+      const result = await stopWorkspace({ challenge });
       results.push({
         challenge,
         stopped: result.stopped,
@@ -298,12 +303,12 @@ export const workspaceActionMethods = {
       count: results.length,
       workspaces: results,
     };
-  },
+  }
 
-  async removeAllWorkspaces() {
+  async function removeAllWorkspaces() {
     const results = [];
-    for (const challenge of Object.keys(this.state.workspaces).sort()) {
-      const result = await this.removeWorkspace({ challenge });
+    for (const challenge of Object.keys(ctx.state.workspaces).sort()) {
+      const result = await removeWorkspace({ challenge });
       results.push({
         challenge,
         removed: result.removed,
@@ -313,32 +318,32 @@ export const workspaceActionMethods = {
       count: results.length,
       workspaces: results,
     };
-  },
+  }
 
-  async applySolvedWorkspaceAction(action) {
+  async function applySolvedWorkspaceAction(action) {
     if (action !== "stop" && action !== "clear") {
       throw new Error(`Invalid workspace action: ${action}`);
     }
-    await this.refreshWorkspaceContainerStates();
+    await workspaceRuntime.refreshWorkspaceContainerStates();
     const results = [];
     let changed = 0;
     let unchanged = 0;
     let failed = 0;
-    for (const challenge of Object.keys(this.state.workspaces).sort()) {
-      const workspace = this.state.workspaces[challenge];
+    for (const challenge of Object.keys(ctx.state.workspaces).sort()) {
+      const workspace = ctx.state.workspaces[challenge];
       if (!workspace) {
         continue;
       }
       let summary = null;
       try {
-        const info = await this.workspaceChallengeInfo(workspace);
+        const info = await workspaceRuntime.workspaceChallengeInfo(workspace);
         if (!info.solved) {
           continue;
         }
-        summary = this.workspaceSummary(workspace, info);
+        summary = workspaceRuntime.workspaceSummary(workspace, info);
         const container = [summary.container, summary.codex_container].filter(Boolean).join(",");
         if (action === "stop") {
-          const result = await this.stopWorkspace({ challenge });
+          const result = await stopWorkspace({ challenge });
           const stopped = result.stopped === true;
           if (stopped) {
             changed += 1;
@@ -357,7 +362,7 @@ export const workspaceActionMethods = {
           });
           continue;
         }
-        await this.removeWorkspace({ challenge });
+        await removeWorkspace({ challenge });
         changed += 1;
         results.push({
           challenge,
@@ -389,13 +394,29 @@ export const workspaceActionMethods = {
       failed,
       workspaces: results,
     };
-  },
-
-  async stopSolvedWorkspaces() {
-    return this.applySolvedWorkspaceAction("stop");
-  },
-
-  async removeSolvedWorkspaces() {
-    return this.applySolvedWorkspaceAction("clear");
   }
-};
+
+  async function stopSolvedWorkspaces() {
+    return applySolvedWorkspaceAction("stop");
+  }
+
+  async function removeSolvedWorkspaces() {
+    return applySolvedWorkspaceAction("clear");
+  }
+
+  return {
+    startChallenge,
+    newSession,
+    setMode,
+    stopWorkspace,
+    removeWorkspace,
+    resetChallenge,
+    startAllChallenges,
+    resetAllChallenges,
+    stopAllWorkspaces,
+    removeAllWorkspaces,
+    applySolvedWorkspaceAction,
+    stopSolvedWorkspaces,
+    removeSolvedWorkspaces,
+  };
+}

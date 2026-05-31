@@ -1,7 +1,9 @@
 import { CODEX_PORT, DEFAULT_MANAGER_HOST } from "../../../constants.js";
-import { CodexAppClient, codexContainerWsUrl, codexHttpUrl, codexWsUrl, waitForCodex } from "./client.js";
 import { runDocker, startCodexWorkspaceContainer } from "../../../docker.js";
 import { nowIso } from "../../../util.js";
+import { beginAutoPromptTurn, finishAutoPromptTurn } from "../auto-prompt.js";
+import { ensurePrimarySession, managedSessionFields } from "../session-registry.js";
+import { CodexAppClient, codexContainerWsUrl, codexHttpUrl, codexWsUrl, waitForCodex } from "./client.js";
 import {
   errorSummary,
   isCodexUnmaterializedThreadError,
@@ -9,28 +11,26 @@ import {
   sessionCollection,
   shellQuote,
 } from "../../helpers.js";
-import { beginAutoPromptTurn, finishAutoPromptTurn } from "../auto-prompt.js";
-import { ensurePrimarySession, managedSessionFields } from "../session-registry.js";
 
 const BACKEND = "codex";
 const clientCaches = new WeakMap();
 
-function clientCache(manager) {
-  if (!clientCaches.has(manager)) {
-    clientCaches.set(manager, new Map());
+function clientCache(context) {
+  if (!clientCaches.has(context)) {
+    clientCaches.set(context, new Map());
   }
-  return clientCaches.get(manager);
+  return clientCaches.get(context);
 }
 
 function codexAttachSessionName(sessionID) {
   return `codex-${sessionID.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48)}`;
 }
 
-async function client(manager, backendState) {
+async function client(context, backendState) {
   if (!backendState?.wsUrl) {
     throw new Error("Codex backend has no WebSocket URL");
   }
-  const cache = clientCache(manager);
+  const cache = clientCache(context);
   const cached = cache.get(backendState.wsUrl);
   if (cached) {
     await cached.connect();
@@ -42,8 +42,8 @@ async function client(manager, backendState) {
   return created;
 }
 
-function registerSession(manager, workspace, thread, { role, mode }) {
-  const backendState = manager.ensureBackendState(workspace, BACKEND);
+function registerSession(workspaceRuntime, workspace, thread, { role, mode }) {
+  const backendState = workspaceRuntime.ensureBackendState(workspace, BACKEND);
   const existing = sessionCollection(backendState)[thread.id] ?? {};
   const registry = {
     session_id: thread.id,
@@ -62,8 +62,8 @@ function registerSession(manager, workspace, thread, { role, mode }) {
   return registry;
 }
 
-function attachTarget(manager, workspace, session) {
-  const backendState = manager.backendState(workspace, BACKEND);
+function attachTarget(workspaceRuntime, workspace, session) {
+  const backendState = workspaceRuntime.backendState(workspace, BACKEND);
   const tmuxSession = codexAttachSessionName(session.session_id);
   const container = backendState.containerName;
   const argv = ["docker", "exec", "-it", container, "tmux", "attach-session", "-t", tmuxSession];
@@ -81,15 +81,15 @@ function attachTarget(manager, workspace, session) {
   };
 }
 
-async function activeTurnID(manager, workspace, session) {
+async function activeTurnID(context, workspaceRuntime, workspace, session) {
   if (session.active_turn_id) {
     return session.active_turn_id;
   }
-  const backendState = manager.backendState(workspace, BACKEND);
+  const backendState = workspaceRuntime.backendState(workspace, BACKEND);
   if (!backendState) {
     return null;
   }
-  const codexClient = await client(manager, backendState);
+  const codexClient = await client(context, backendState);
   const thread = await codexClient.readThread(session.thread_id);
   const activeTurn = [...(thread?.turns ?? [])].reverse().find((turn) => turn?.status === "inProgress" || turn?.status === "active");
   if (!activeTurn?.id) {
@@ -113,30 +113,31 @@ export const codexBackend = {
     };
   },
 
-  startContainer(manager, workspace, info, config) {
+  startContainer(context, workspace, info, config) {
     return startCodexWorkspaceContainer({
       bindHost: config.workspace.bindHost,
       challenge: workspace.challenge,
       challengeDir: info.dir,
-      log: (message) => manager.log(message),
+      log: (message) => context.log(message),
     });
   },
 
-  async waitUntilReady(manager, backendState) {
+  async waitUntilReady(context, backendState) {
     await waitForCodex(backendState.serverUrl);
-    await client(manager, backendState);
+    await client(context, backendState);
   },
 
-  async syncSessions(manager, workspace) {
-    const backendState = manager.backendState(workspace, BACKEND);
+  async syncSessions(context, services, workspace) {
+    const { workspaceRuntime } = services;
+    const backendState = workspaceRuntime.backendState(workspace, BACKEND);
     if (!backendState) {
       return [];
     }
     if (backendState.status !== "running") {
       return Object.values(sessionCollection(backendState));
     }
-    const solved = (await manager.workspaceChallengeInfo(workspace)).solutions[BACKEND].solved;
-    const codexClient = await client(manager, backendState);
+    const solved = (await workspaceRuntime.workspaceChallengeInfo(workspace)).solutions[BACKEND].solved;
+    const codexClient = await client(context, backendState);
     for (const session of Object.values(sessionCollection(backendState))) {
       if (!session.thread_id) {
         continue;
@@ -160,33 +161,36 @@ export const codexBackend = {
         session.last_error = errorSummary(error);
       }
     }
-    await manager.save();
+    await context.save();
     return Object.values(sessionCollection(backendState));
   },
 
-  async ensurePrimarySession(manager, workspace, mode) {
-    return ensurePrimarySession(manager, workspace, BACKEND, mode, async (backendState) => {
-      const codexClient = await client(manager, backendState);
+  async ensurePrimarySession(context, services, workspace, mode) {
+    const { workspaceRuntime } = services;
+    return ensurePrimarySession(workspaceRuntime, workspace, BACKEND, mode, async (backendState) => {
+      const codexClient = await client(context, backendState);
       const thread = await codexClient.startThread();
-      return registerSession(manager, workspace, thread, { role: "primary", mode });
+      return registerSession(workspaceRuntime, workspace, thread, { role: "primary", mode });
     });
   },
 
-  async createSession(manager, workspace, mode) {
-    const codexClient = await client(manager, manager.backendState(workspace, BACKEND));
+  async createSession(context, services, workspace, mode) {
+    const { workspaceRuntime } = services;
+    const codexClient = await client(context, workspaceRuntime.backendState(workspace, BACKEND));
     const thread = await codexClient.startThread();
-    return registerSession(manager, workspace, thread, {
+    return registerSession(workspaceRuntime, workspace, thread, {
       role: "auxiliary",
       mode,
     });
   },
 
-  async resolveAttachTarget(manager, workspace, session) {
-    const backendState = manager.backendState(workspace, BACKEND);
+  async resolveAttachTarget(context, services, workspace, session) {
+    const { workspaceRuntime } = services;
+    const backendState = workspaceRuntime.backendState(workspace, BACKEND);
     if (!backendState || backendState.status !== "running") {
       throw new Error(`Codex workspace ${workspace.challenge} is not running`);
     }
-    const target = attachTarget(manager, workspace, session);
+    const target = attachTarget(workspaceRuntime, workspace, session);
     const command = `codex --remote ${codexContainerWsUrl()} resume ${session.thread_id} --no-alt-screen`;
     const hasSession = await runDocker(["exec", backendState.containerName, "tmux", "has-session", "-t", target.tmux_session])
       .then(() => true)
@@ -197,49 +201,49 @@ export const codexBackend = {
     return target;
   },
 
-  async interruptSession(manager, workspace, session) {
-    const backendState = manager.backendState(workspace, BACKEND);
+  async interruptSession(context, services, workspace, session) {
+    const backendState = services.workspaceRuntime.backendState(workspace, BACKEND);
     if (!backendState) {
       return false;
     }
-    const turnID = await activeTurnID(manager, workspace, session);
+    const turnID = await activeTurnID(context, services.workspaceRuntime, workspace, session);
     if (!turnID) {
       return false;
     }
-    const codexClient = await client(manager, backendState);
+    const codexClient = await client(context, backendState);
     await codexClient.interruptTurn(session.thread_id, turnID);
     return true;
   },
 
-  async sendAutoPromptTurn(manager, workspace, sessionID, kind) {
-    const backendState = manager.backendState(workspace, BACKEND);
-    const session = manager.sessionRegistry(workspace, BACKEND, sessionID);
+  async sendAutoPromptTurn(context, services, workspace, sessionID, kind) {
+    const backendState = services.workspaceRuntime.backendState(workspace, BACKEND);
+    const session = services.sessions.sessionRegistry(workspace, BACKEND, sessionID);
     if (!backendState || !session) {
       throw new Error(`Codex session ${sessionID} not found`);
     }
-    const codexClient = await client(manager, backendState);
+    const codexClient = await client(context, backendState);
     if (session.last_auto_prompt_at) {
       await codexClient.resumeThread(session.thread_id);
     }
-    const { promptKind, prompt } = await beginAutoPromptTurn(manager, workspace, BACKEND, sessionID, kind, session);
+    const { promptKind, prompt } = await beginAutoPromptTurn(context, services, workspace, BACKEND, sessionID, kind, session);
     const pendingTurn = await codexClient.startTurn(session.thread_id, prompt);
-    manager.updateSessionRegistry(workspace, BACKEND, sessionID, {
+    services.sessions.updateSessionRegistry(workspace, BACKEND, sessionID, {
       active_turn_id: pendingTurn.id,
     });
-    await manager.save();
+    await context.save();
     const turn = await codexClient.waitForTurn(session.thread_id, pendingTurn.id);
     if (turn.status === "failed") {
       throw new Error(`codex turn failed: ${errorSummary(turn.error)}`);
     }
-    await finishAutoPromptTurn(manager, workspace, BACKEND, sessionID, {
+    await finishAutoPromptTurn(context, services, workspace, BACKEND, sessionID, {
       active_turn_id: "",
     });
-    await this.syncSessions(manager, workspace).catch((error) => manager.log(`sync codex ${workspace.challenge} after ${promptKind} failed: ${error.message}`));
+    await this.syncSessions(context, services, workspace).catch((error) => context.log(`sync codex ${workspace.challenge} after ${promptKind} failed: ${error.message}`));
   },
 
-  async dispose(manager, backendState = null) {
+  async dispose(context, backendState = null) {
     const wsUrl = backendState?.wsUrl ?? null;
-    const cache = clientCache(manager);
+    const cache = clientCache(context);
     if (wsUrl) {
       cache.get(wsUrl)?.dispose();
       cache.delete(wsUrl);

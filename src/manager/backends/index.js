@@ -11,6 +11,6 @@ export function backendAdapter(backend) {
   return backendAdapters[validateBackend(backend)];
 }
 
-export async function disposeBackendAdapters(manager) {
-  await Promise.all(Object.values(backendAdapters).map((adapter) => adapter.dispose(manager)));
+export async function disposeBackendAdapters(context) {
+  await Promise.all(Object.values(backendAdapters).map((adapter) => adapter.dispose(context)));
 }

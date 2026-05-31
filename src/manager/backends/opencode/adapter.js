@@ -1,8 +1,10 @@
 import { AGENT_NAME, CONTAINER_CHALLENGE_DIR, OPENCODE_PORT } from "../../../constants.js";
 import { buildWorkspaceUrls } from "../../../config.js";
 import { startWorkspaceContainer } from "../../../docker.js";
-import { createAttachedRuntime, defaultSessionOptions, listSessionMessages, readSessionInfo, waitForOpenCode } from "./client.js";
 import { nowIso } from "../../../util.js";
+import { beginAutoPromptTurn, finishAutoPromptTurn } from "../auto-prompt.js";
+import { ensurePrimarySession, managedSessionFields } from "../session-registry.js";
+import { createAttachedRuntime, defaultSessionOptions, listSessionMessages, readSessionInfo, waitForOpenCode } from "./client.js";
 import {
   agentErrorSummary,
   errorSummary,
@@ -11,36 +13,34 @@ import {
   sessionCollection,
   sessionUrl,
 } from "../../helpers.js";
-import { beginAutoPromptTurn, finishAutoPromptTurn } from "../auto-prompt.js";
-import { ensurePrimarySession, managedSessionFields } from "../session-registry.js";
 
 const BACKEND = "opencode";
 const runtimeCaches = new WeakMap();
 const observerCaches = new WeakMap();
 
-function runtimeCache(manager) {
-  if (!runtimeCaches.has(manager)) {
-    runtimeCaches.set(manager, new Map());
+function runtimeCache(context) {
+  if (!runtimeCaches.has(context)) {
+    runtimeCaches.set(context, new Map());
   }
-  return runtimeCaches.get(manager);
+  return runtimeCaches.get(context);
 }
 
-function observerCache(manager) {
-  if (!observerCaches.has(manager)) {
-    observerCaches.set(manager, new Map());
+function observerCache(context) {
+  if (!observerCaches.has(context)) {
+    observerCaches.set(context, new Map());
   }
-  return observerCaches.get(manager);
+  return observerCaches.get(context);
 }
 
 function observerKey(serverUrl, sessionID) {
   return `${serverUrl}\u0000${sessionID}`;
 }
 
-async function runtime(manager, backendState) {
+async function runtime(context, backendState) {
   if (!backendState?.serverUrl) {
     throw new Error("OpenCode backend has no server URL");
   }
-  const cache = runtimeCache(manager);
+  const cache = runtimeCache(context);
   const cached = cache.get(backendState.serverUrl);
   if (cached) {
     return cached;
@@ -50,17 +50,18 @@ async function runtime(manager, backendState) {
   return created;
 }
 
-async function observeSession(manager, workspace, sessionID) {
-  const backendState = manager.backendState(workspace, BACKEND);
-  if (!backendState?.serverUrl || backendState.status !== "running" || manager.stopping) {
+async function observeSession(context, services, workspace, sessionID) {
+  const { workspaceRuntime, sessions } = services;
+  const backendState = workspaceRuntime.backendState(workspace, BACKEND);
+  if (!backendState?.serverUrl || backendState.status !== "running" || context.stopping) {
     return;
   }
-  const observers = observerCache(manager);
+  const observers = observerCache(context);
   const key = observerKey(backendState.serverUrl, sessionID);
   if (observers.has(key)) {
     return;
   }
-  const openCodeRuntime = await runtime(manager, backendState);
+  const openCodeRuntime = await runtime(context, backendState);
   const entry = {
     challenge: workspace.challenge,
     serverUrl: backendState.serverUrl,
@@ -78,9 +79,9 @@ async function observeSession(manager, workspace, sessionID) {
       });
       entry.stop = () => observer.stop();
       for await (const event of observer.receiveResponse()) {
-        const currentWorkspace = manager.state.workspaces[entry.challenge];
-        const registry = currentWorkspace ? manager.sessionRegistry(currentWorkspace, BACKEND, entry.sessionID) : null;
-        if (!currentWorkspace || !registry || manager.stopping) {
+        const currentWorkspace = context.state.workspaces[entry.challenge];
+        const registry = currentWorkspace ? sessions.sessionRegistry(currentWorkspace, BACKEND, entry.sessionID) : null;
+        if (!currentWorkspace || !registry || context.stopping) {
           observer.stop();
           break;
         }
@@ -91,33 +92,33 @@ async function observeSession(manager, workspace, sessionID) {
           if (event.status === "busy" || event.status === "retry") {
             nextValues.status = "active";
           }
-          manager.updateSessionRegistry(currentWorkspace, BACKEND, entry.sessionID, nextValues);
-          await manager.save();
+          sessions.updateSessionRegistry(currentWorkspace, BACKEND, entry.sessionID, nextValues);
+          await context.save();
           continue;
         }
         if (event.type === "error") {
-          manager.updateSessionRegistry(currentWorkspace, BACKEND, entry.sessionID, {
+          sessions.updateSessionRegistry(currentWorkspace, BACKEND, entry.sessionID, {
             last_error: agentErrorSummary(event.error),
             last_seen_at: nowIso(),
           });
-          await manager.save();
+          await context.save();
           continue;
         }
         if (event.type === "result") {
-          await manager.syncBackendOutputs(currentWorkspace, BACKEND);
-          const solved = (await manager.workspaceChallengeInfo(currentWorkspace)).solutions[BACKEND].solved;
-          await manager.reconcileSolvedBy(currentWorkspace);
-          manager.updateSessionRegistry(currentWorkspace, BACKEND, entry.sessionID, {
+          await workspaceRuntime.syncBackendOutputs(currentWorkspace, BACKEND);
+          const solved = (await workspaceRuntime.workspaceChallengeInfo(currentWorkspace)).solutions[BACKEND].solved;
+          await workspaceRuntime.reconcileSolvedBy(currentWorkspace);
+          sessions.updateSessionRegistry(currentWorkspace, BACKEND, entry.sessionID, {
             last_error: event.result.error ? agentErrorSummary(event.result.error) : "",
             last_response_at: nowIso(),
             last_seen_at: nowIso(),
             status: solved ? "completed" : "idle",
           });
-          await manager.save();
+          await context.save();
         }
       }
     } catch (error) {
-      await manager.log(`observe opencode ${entry.challenge}/${entry.sessionID} failed: ${errorSummary(error)}`);
+      await context.log(`observe opencode ${entry.challenge}/${entry.sessionID} failed: ${errorSummary(error)}`);
     } finally {
       observer?.stop();
       observers.delete(key);
@@ -127,8 +128,8 @@ async function observeSession(manager, workspace, sessionID) {
   observers.set(key, entry);
 }
 
-function registerSession(manager, workspace, sessionID, { role, mode }) {
-  const backendState = manager.ensureBackendState(workspace, BACKEND);
+function registerSession(workspaceRuntime, workspace, sessionID, { role, mode }) {
+  const backendState = workspaceRuntime.ensureBackendState(workspace, BACKEND);
   const existing = sessionCollection(backendState)[sessionID] ?? {};
   const registry = {
     session_id: sessionID,
@@ -149,31 +150,32 @@ export const opencodeBackend = {
     return buildWorkspaceUrls(config, hostPort);
   },
 
-  startContainer(manager, workspace, info, config) {
+  startContainer(context, workspace, info, config) {
     return startWorkspaceContainer({
       bindHost: config.workspace.bindHost,
       challenge: workspace.challenge,
       challengeDir: info.dir,
-      log: (message) => manager.log(message),
+      log: (message) => context.log(message),
     });
   },
 
-  async waitUntilReady(manager, backendState) {
-    await runtime(manager, backendState);
+  async waitUntilReady(context, backendState) {
+    await runtime(context, backendState);
   },
 
-  async syncSessions(manager, workspace) {
-    const backendState = manager.backendState(workspace, BACKEND);
+  async syncSessions(context, services, workspace) {
+    const { workspaceRuntime } = services;
+    const backendState = workspaceRuntime.backendState(workspace, BACKEND);
     if (!backendState) {
       return [];
     }
     if (backendState.status !== "running") {
       return Object.values(sessionCollection(backendState));
     }
-    const openCodeRuntime = await runtime(manager, backendState);
+    const openCodeRuntime = await runtime(context, backendState);
     const sessions = await openCodeRuntime.listSessions(200);
     const sessionIDs = new Set(sessions.map((session) => session.sessionID));
-    const solved = (await manager.workspaceChallengeInfo(workspace)).solutions[BACKEND].solved;
+    const solved = (await workspaceRuntime.workspaceChallengeInfo(workspace)).solutions[BACKEND].solved;
     for (const session of sessions) {
       const existing = sessionCollection(backendState)[session.sessionID] ?? {};
       const sessionInfo = await readSessionInfo(openCodeRuntime, session.sessionID).catch(() => null);
@@ -207,8 +209,8 @@ export const opencodeBackend = {
       }
       sessionCollection(backendState)[session.sessionID] = registry;
       if (registry.status === "active") {
-        observeSession(manager, workspace, session.sessionID)
-          .catch((error) => manager.log(`observe ${workspace.challenge}/${session.sessionID} failed: ${error.message}`));
+        observeSession(context, services, workspace, session.sessionID)
+          .catch((error) => context.log(`observe ${workspace.challenge}/${session.sessionID} failed: ${error.message}`));
       }
     }
     for (const session of Object.values(sessionCollection(backendState))) {
@@ -216,28 +218,30 @@ export const opencodeBackend = {
         session.status = "unknown";
       }
     }
-    await manager.save();
+    await context.save();
     return Object.values(sessionCollection(backendState));
   },
 
-  async ensurePrimarySession(manager, workspace, mode) {
-    return ensurePrimarySession(manager, workspace, BACKEND, mode, async (backendState) => {
-      const openCodeRuntime = await runtime(manager, backendState);
+  async ensurePrimarySession(context, services, workspace, mode) {
+    const { workspaceRuntime } = services;
+    return ensurePrimarySession(workspaceRuntime, workspace, BACKEND, mode, async (backendState) => {
+      const openCodeRuntime = await runtime(context, backendState);
       const session = await openCodeRuntime.createSession(defaultSessionOptions());
-      return registerSession(manager, workspace, session.id, { role: "primary", mode });
+      return registerSession(workspaceRuntime, workspace, session.id, { role: "primary", mode });
     });
   },
 
-  async createSession(manager, workspace, mode) {
-    const openCodeRuntime = await runtime(manager, manager.backendState(workspace, BACKEND));
+  async createSession(context, services, workspace, mode) {
+    const { workspaceRuntime } = services;
+    const openCodeRuntime = await runtime(context, workspaceRuntime.backendState(workspace, BACKEND));
     const session = await openCodeRuntime.createSession(defaultSessionOptions());
-    return registerSession(manager, workspace, session.id, {
+    return registerSession(workspaceRuntime, workspace, session.id, {
       role: "auxiliary",
       mode,
     });
   },
 
-  resolveAttachTarget(manager, workspace, session) {
+  resolveAttachTarget(_context, _services, workspace, session) {
     return {
       challenge: workspace.challenge,
       backend: BACKEND,
@@ -249,40 +253,40 @@ export const opencodeBackend = {
     };
   },
 
-  async interruptSession(manager, workspace, session) {
-    const backendState = manager.backendState(workspace, BACKEND);
+  async interruptSession(context, services, workspace, session) {
+    const backendState = services.workspaceRuntime.backendState(workspace, BACKEND);
     if (!backendState) {
       return false;
     }
-    const openCodeRuntime = await runtime(manager, backendState);
+    const openCodeRuntime = await runtime(context, backendState);
     const opened = await openCodeRuntime.openSession(session.session_id, defaultSessionOptions());
     await opened.interrupt();
     return true;
   },
 
-  async sendAutoPromptTurn(manager, workspace, sessionID, kind) {
-    const backendState = manager.backendState(workspace, BACKEND);
-    const openCodeRuntime = await runtime(manager, backendState);
+  async sendAutoPromptTurn(context, services, workspace, sessionID, kind) {
+    const backendState = services.workspaceRuntime.backendState(workspace, BACKEND);
+    const openCodeRuntime = await runtime(context, backendState);
     const session = await openCodeRuntime.openSession(sessionID, { agent: AGENT_NAME });
-    const { promptKind, prompt } = await beginAutoPromptTurn(manager, workspace, BACKEND, sessionID, kind);
+    const { promptKind, prompt } = await beginAutoPromptTurn(context, services, workspace, BACKEND, sessionID, kind);
     const result = await session.runAgent(prompt, { agent: AGENT_NAME });
     if (result?.error) {
       throw new Error(`agent turn failed: ${errorSummary(result.error)}`);
     }
-    await finishAutoPromptTurn(manager, workspace, BACKEND, sessionID);
-    await this.syncSessions(manager, workspace).catch((error) => manager.log(`sync ${workspace.challenge} after ${promptKind} failed: ${error.message}`));
+    await finishAutoPromptTurn(context, services, workspace, BACKEND, sessionID);
+    await this.syncSessions(context, services, workspace).catch((error) => context.log(`sync ${workspace.challenge} after ${promptKind} failed: ${error.message}`));
   },
 
-  async dispose(manager, backendState = null) {
+  async dispose(context, backendState = null) {
     const serverUrl = backendState?.serverUrl ?? null;
-    const observers = observerCache(manager);
+    const observers = observerCache(context);
     for (const [key, observer] of observers.entries()) {
       if (!serverUrl || observer.serverUrl === serverUrl) {
         observer.stop();
         observers.delete(key);
       }
     }
-    const cache = runtimeCache(manager);
+    const cache = runtimeCache(context);
     if (serverUrl) {
       const cached = cache.get(serverUrl);
       await cached?.dispose().catch(() => {});
