@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { getChallengeInfo, getChallengeInfoAtPath, scanChallenges } from "../../challenges.js";
-import { SOLUTION_FLAG_FILE, SOLUTION_WRITEUP_FILE } from "../../constants.js";
+import { BACKENDS, SOLUTION_FLAG_FILE, SOLUTION_WRITEUP_FILE } from "../../constants.js";
 import { loadFlagDockConfig } from "../../config.js";
 import {
   backendChallengeDir,
@@ -40,6 +40,29 @@ export function createWorkspaceRuntimeService(ctx) {
   async function configuredChallengeList(config = null) {
     const resolvedConfig = config ?? await loadFlagDockConfig();
     return scanChallenges(resolvedConfig.workspace.challengesDir, ctx.state.workspaces);
+  }
+
+  async function configuredFlags(config = null) {
+    const resolvedConfig = config ?? await loadFlagDockConfig();
+    const challenges = await configuredChallengeList(resolvedConfig);
+    const flags = [];
+    for (const item of challenges) {
+      const info = await configuredChallengeInfo(item.challenge, resolvedConfig);
+      if (!info.valid) {
+        continue;
+      }
+      for (const backend of BACKENDS) {
+        const solution = info.solutions[backend];
+        if (!solution?.flagPath || !await nonEmptyFile(solution.flagPath)) {
+          continue;
+        }
+        const flag = (await fs.readFile(solution.flagPath, "utf8")).trim();
+        if (flag) {
+          flags.push({ challenge: item.challenge, backend, flag });
+        }
+      }
+    }
+    return flags;
   }
 
   function getWorkspace(challenge) {
@@ -186,6 +209,22 @@ export function createWorkspaceRuntimeService(ctx) {
     await ctx.save();
   }
 
+  async function syncWorkspaceOutputs() {
+    const errors = [];
+    for (const workspace of Object.values(ctx.state.workspaces)) {
+      for (const backend of Object.keys(workspace.backends ?? {})) {
+        try {
+          await syncBackendOutputs(workspace, backend);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          errors.push({ challenge: workspace.challenge, backend, error: message });
+          await ctx.log(`sync outputs ${workspace.challenge}/${backend} failed: ${message}`).catch(() => {});
+        }
+      }
+    }
+    return { errors };
+  }
+
   async function reconcileSolvedBy(workspace, info = null) {
     const resolvedInfo = info ?? await workspaceChallengeInfo(workspace);
     if (workspace.solvedBy && resolvedInfo.solvedBackends.includes(workspace.solvedBy)) {
@@ -284,6 +323,7 @@ export function createWorkspaceRuntimeService(ctx) {
     workspaceChallengeInfo,
     challengeInfoForAction,
     configuredChallengeList,
+    configuredFlags,
     getWorkspace,
     ensureBackendState,
     backendState,
@@ -294,6 +334,7 @@ export function createWorkspaceRuntimeService(ctx) {
     refreshBackendState,
     refreshWorkspaceContainerState,
     refreshWorkspaceContainerStates,
+    syncWorkspaceOutputs,
     reconcileSolvedBy,
     prepareChallengeBackends,
     ensureBackendWorkspace,

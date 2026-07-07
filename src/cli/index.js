@@ -1,4 +1,5 @@
 import { resetChallenge, startChallenge } from "./commands/challenge.js";
+import { watchFlags } from "./commands/flags.js";
 import { showChallenges, showStatus, startManager, stopManager } from "./commands/manager.js";
 import { attach, newSession, setMode, showSessions } from "./commands/session.js";
 import { workspaceAction, workspaceAllAction, workspaceSolvedAction } from "./commands/workspace.js";
@@ -24,6 +25,10 @@ export async function runCli(args) {
   }
   if (command === "challenges") {
     await showChallenges();
+    return;
+  }
+  if (command === "flags" && subcommand === "watch") {
+    await watchFlags(rest);
     return;
   }
   if (command === "challenge" && subcommand === "start") {

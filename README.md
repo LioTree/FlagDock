@@ -124,6 +124,7 @@ FlagDock keeps two kinds of internal state under `.flagdock/`:
 ```bash
 node bin/flagdock.js status
 node bin/flagdock.js challenges
+node bin/flagdock.js flags watch
 node bin/flagdock.js sessions <challenge>
 node bin/flagdock.js challenge start <challenge> --mode auto
 node bin/flagdock.js challenge start <challenge> --mode manual
@@ -145,6 +146,7 @@ node bin/flagdock.js stop
 
 - Use `challenge start` to create or resume a workspace from a challenge and optionally start solving.
 - Use `challenge start --all` to batch-start every challenge currently in `available` state.
+- Use `flags watch` to keep a foreground process open and print newly discovered flags from all challenges and backends.
 - Use `workspace stop` to keep the current workspace state but stop its containers.
 - Use `workspace clear` to discard the runtime workspace while keeping saved outputs such as `flag.txt` and `wp.md`.
 - Add `--solved` to `workspace stop` or `workspace clear` to apply that action only to solved workspaces.

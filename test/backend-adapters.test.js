@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { FlagDockManager } from "../src/manager/index.js";
+import { pollFlags } from "../src/cli/commands/flags.js";
 import { beginAutoPromptTurn, finishAutoPromptTurn } from "../src/manager/backends/auto-prompt.js";
 import { backendAdapter } from "../src/manager/backends/index.js";
 import { ensurePrimarySession, managedSessionFields } from "../src/manager/backends/session-registry.js";
@@ -153,4 +154,50 @@ test("auto prompt lifecycle updates registry status and completion fields", asyn
   assert.equal(registry.last_error, "");
   assert.equal(typeof registry.last_response_at, "string");
   assert.equal(saved.length, 2);
+});
+
+test("flag watch polling prints only newly seen flags", async () => {
+  const seen = new Set();
+  const printed = [];
+  const fetchFlags = async () => ({
+    flags: [
+      { challenge: "sample", backend: "opencode", flag: "flag{one}" },
+      { challenge: "sample", backend: "codex", flag: "flag{one}" },
+    ],
+  });
+
+  assert.equal(await pollFlags(fetchFlags, seen, (item) => printed.push(item)), 2);
+  assert.equal(await pollFlags(fetchFlags, seen, (item) => printed.push(item)), 0);
+  assert.deepEqual(printed, [
+    { challenge: "sample", backend: "opencode", flag: "flag{one}" },
+    { challenge: "sample", backend: "codex", flag: "flag{one}" },
+  ]);
+});
+
+test("workspace output sync isolates backend errors", async () => {
+  const manager = new FlagDockManager();
+  const logs = [];
+  manager.context.log = async (message) => logs.push(message);
+  manager.state = {
+    version: 2,
+    workspaces: {
+      sample: {
+        challenge: "sample",
+        backends: {
+          unknown: {},
+          opencode: {},
+        },
+      },
+    },
+  };
+
+  const result = await manager.services.workspaceRuntime.syncWorkspaceOutputs();
+  assert.equal(result.errors.length, 1);
+  assert.deepEqual(result.errors[0], {
+    challenge: "sample",
+    backend: "unknown",
+    error: "Invalid backend: unknown",
+  });
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /sync outputs sample\/unknown failed: Invalid backend: unknown/);
 });

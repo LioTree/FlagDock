@@ -36,6 +36,11 @@ export function createHttpController({ workspaceRuntime, sessions, actions }, cl
       writeJson(response, 200, { challenges: await workspaceRuntime.configuredChallengeList() });
       return;
     }
+    if (request.method === "GET" && url.pathname === "/flags") {
+      await workspaceRuntime.syncWorkspaceOutputs();
+      writeJson(response, 200, { flags: await workspaceRuntime.configuredFlags() });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/challenge/start") {
       writeJson(response, 200, await actions.startChallenge(await readBody(request)));
       return;

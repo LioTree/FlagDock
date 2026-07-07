@@ -6,6 +6,7 @@ export function usage() {
   flagdock stop
   flagdock status
   flagdock challenges
+  flagdock flags watch
   flagdock challenge start <challenge> [--mode auto|manual]
   flagdock challenge start --all [--mode auto|manual]
   flagdock challenge reset <challenge>
