@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import WebSocket from "ws";
 import { CODEX_PORT, CONTAINER_CHALLENGE_DIR } from "../../../constants.js";
 import { sleep } from "../../../util.js";
 
@@ -61,9 +62,13 @@ export async function waitForCodex(serverUrl, timeoutMs = 30000) {
 }
 
 export class CodexAppClient extends EventEmitter {
-  constructor(wsUrl) {
+  constructor(wsUrl, authToken) {
     super();
+    if (!authToken) {
+      throw new Error("Codex app-server authentication token is required");
+    }
     this.wsUrl = wsUrl;
+    this.authToken = authToken;
     this.ws = null;
     this.nextID = 1;
     this.pending = new Map();
@@ -76,7 +81,11 @@ export class CodexAppClient extends EventEmitter {
       return this;
     }
     await new Promise((resolve, reject) => {
-      const ws = new WebSocket(this.wsUrl);
+      const ws = new WebSocket(this.wsUrl, {
+        headers: {
+          Authorization: `Bearer ${this.authToken}`,
+        },
+      });
       const timer = setTimeout(() => {
         ws.close();
         reject(new Error(`Timed out connecting to ${this.wsUrl}`));
@@ -229,7 +238,6 @@ export class CodexAppClient extends EventEmitter {
       approvalPolicy: "never",
       sandbox: "danger-full-access",
       experimentalRawEvents: false,
-      persistExtendedHistory: true,
     });
     return response.thread;
   }
@@ -241,7 +249,6 @@ export class CodexAppClient extends EventEmitter {
       approvalPolicy: "never",
       sandbox: "danger-full-access",
       excludeTurns: true,
-      persistExtendedHistory: true,
     });
     return response.thread;
   }

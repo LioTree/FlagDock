@@ -1,20 +1,24 @@
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
   BACKENDS,
   BASE_IMAGE,
+  CODEX_APP_SERVER_TOKEN_FILE,
   CODEX_CONFIG_FILE,
   RUNTIME_AGENT_DIR,
   RUNTIME_CODEX_AGENTS_FILE,
   CODEX_IMAGE,
   CODEX_PORT,
+  CODEX_VERSION,
   CONTAINER_CHALLENGE_DIR,
   LEGACY_OPENCODE_CONFIG_FILE,
   OPENCODE_AUTH_FILE,
   OPENCODE_CONFIG_FILE,
   OPENCODE_PORT,
+  OPENCODE_VERSION,
   RUNTIME_OPENCODE_MANAGED_CONFIG_DIR,
   ROOT_DIR,
   SOLUTION_FLAG_FILE,
@@ -28,8 +32,10 @@ import { ensureDir, pathExists, slugify } from "./util.js";
 const execFileAsync = promisify(execFile);
 const CONTAINER_OPENCODE_AGENT_DIR = "/root/.opencode/agent";
 const CONTAINER_OPENCODE_CONFIG_FILE = "/root/.config/opencode/opencode.json";
+const CONTAINER_OPENCODE_DATA_DIR = "/root/.local/share/opencode";
 const CONTAINER_OPENCODE_AUTH_FILE = "/root/.local/share/opencode/auth.json";
 const CONTAINER_OPENCODE_MANAGED_CONFIG_DIR = "/etc/opencode";
+const CONTAINER_CODEX_HOME_DIR = "/root/.codex";
 
 export async function runDocker(args, options = {}) {
   try {
@@ -73,7 +79,31 @@ export function backendChallengeDir(challenge, backend) {
 }
 
 export async function removeBackendWorkspaceDir(challenge, backend) {
-  await fs.rm(backendWorkspaceRoot(challenge, backend), { recursive: true, force: true });
+  const workspaceRoot = backendWorkspaceRoot(challenge, backend);
+  try {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  } catch (error) {
+    if ((error?.code !== "EACCES" && error?.code !== "EPERM") || !await pathExists(workspaceRoot)) {
+      throw error;
+    }
+    const uid = process.getuid?.();
+    const gid = process.getgid?.();
+    if (!Number.isInteger(uid) || !Number.isInteger(gid)) {
+      throw error;
+    }
+    await runDocker([
+      "run",
+      "--rm",
+      "-v",
+      `${path.resolve(workspaceRoot)}:/workspace`,
+      BASE_IMAGE,
+      "chown",
+      "-R",
+      `${uid}:${gid}`,
+      "/workspace",
+    ]);
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
 }
 
 export async function removeChallengeWorkspaceDirIfEmpty(challenge) {
@@ -114,11 +144,33 @@ export async function ensureImages(backends, log = () => {}) {
   }
   if (selected.has("opencode") && !await imageExists(WORK_IMAGE)) {
     log(`building ${WORK_IMAGE} from Dockerfile.opencode`);
-    await runDocker(["build", "-f", "Dockerfile.opencode", "--build-arg", `BASE_IMAGE=${BASE_IMAGE}`, "-t", WORK_IMAGE, "."]);
+    await runDocker([
+      "build",
+      "-f",
+      "Dockerfile.opencode",
+      "--build-arg",
+      `BASE_IMAGE=${BASE_IMAGE}`,
+      "--build-arg",
+      `OPENCODE_VERSION=${OPENCODE_VERSION}`,
+      "-t",
+      WORK_IMAGE,
+      ".",
+    ]);
   }
   if (selected.has("codex") && !await imageExists(CODEX_IMAGE)) {
     log(`building ${CODEX_IMAGE} from Dockerfile.codex`);
-    await runDocker(["build", "-f", "Dockerfile.codex", "--build-arg", `BASE_IMAGE=${BASE_IMAGE}`, "-t", CODEX_IMAGE, "."]);
+    await runDocker([
+      "build",
+      "-f",
+      "Dockerfile.codex",
+      "--build-arg",
+      `BASE_IMAGE=${BASE_IMAGE}`,
+      "--build-arg",
+      `CODEX_VERSION=${CODEX_VERSION}`,
+      "-t",
+      CODEX_IMAGE,
+      ".",
+    ]);
   }
 }
 
@@ -211,6 +263,39 @@ async function ensureExpectedMounts(inspected, name, expectedMounts, log = () =>
   return inspected;
 }
 
+async function ensureExpectedImage(inspected, name, image, log = () => {}) {
+  if (!inspected || inspected.Config?.Image === image) {
+    return inspected;
+  }
+  log(`recreating container ${name} to use ${image}`);
+  await runDocker(["rm", "-f", name]);
+  return null;
+}
+
+export async function migrateOpenCodeData(
+  inspected,
+  name,
+  opencodeDataDir,
+  log = () => {},
+  copyData = (source, destination) => runDocker(["cp", source, destination]),
+) {
+  if (!inspected) {
+    return false;
+  }
+  const destination = path.resolve(opencodeDataDir);
+  if (containerMountSource(inspected, CONTAINER_OPENCODE_DATA_DIR) === destination) {
+    return false;
+  }
+  await ensureDir(destination);
+  if ((await fs.readdir(destination)).length > 0) {
+    log(`keeping existing OpenCode data in ${destination}`);
+    return false;
+  }
+  log(`migrating OpenCode data from container ${name} to ${destination}`);
+  await copyData(`${name}:${CONTAINER_OPENCODE_DATA_DIR}/.`, destination);
+  return true;
+}
+
 async function ensureMountsAbsent(inspected, name, destinations, log = () => {}) {
   if (!inspected) {
     return null;
@@ -232,6 +317,7 @@ export function buildOpenCodeDockerArgs({
   runtimeChallengeDir,
   agentDir,
   managedConfigDir,
+  opencodeDataDir,
   opencodeConfigFile = null,
   opencodeAuthFile = null,
   includeOpenCodeConfigContent = false,
@@ -255,6 +341,8 @@ export function buildOpenCodeDockerArgs({
     `${path.resolve(agentDir)}:${CONTAINER_OPENCODE_AGENT_DIR}:ro`,
     "-v",
     `${path.resolve(managedConfigDir)}:${CONTAINER_OPENCODE_MANAGED_CONFIG_DIR}:ro`,
+    "-v",
+    `${path.resolve(opencodeDataDir)}:${CONTAINER_OPENCODE_DATA_DIR}`,
   ];
   if (opencodeConfigFile) {
     args.push("-v", `${path.resolve(opencodeConfigFile)}:${CONTAINER_OPENCODE_CONFIG_FILE}:ro`);
@@ -269,14 +357,83 @@ export function buildOpenCodeDockerArgs({
   return args;
 }
 
+export function buildCodexDockerArgs({
+  bindHost,
+  containerName,
+  runtimeChallengeDir,
+  codexHomeDir,
+}) {
+  return [
+    "run",
+    "-d",
+    "--name",
+    containerName,
+    "--privileged",
+    "--cap-add=SYS_PTRACE",
+    "--security-opt",
+    "seccomp=unconfined",
+    "--add-host",
+    "host.docker.internal:host-gateway",
+    "-p",
+    `${bindHost}::${CODEX_PORT}`,
+    "--env-file",
+    path.resolve(CODEX_ENV_FILE),
+    "-v",
+    `${path.resolve(runtimeChallengeDir)}:${CONTAINER_CHALLENGE_DIR}`,
+    "-v",
+    `${path.resolve(codexHomeDir)}:${CONTAINER_CODEX_HOME_DIR}`,
+    "-v",
+    `${path.resolve(CODEX_CONFIG_FILE)}:${CONTAINER_CODEX_HOME_DIR}/config.toml:ro`,
+    CODEX_IMAGE,
+  ];
+}
+
+export async function ensureCodexAppServerToken(codexHomeDir) {
+  const tokenPath = path.join(codexHomeDir, CODEX_APP_SERVER_TOKEN_FILE);
+  await ensureDir(codexHomeDir);
+  try {
+    await fs.writeFile(tokenPath, `${randomBytes(32).toString("base64url")}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+  } catch (error) {
+    if (error?.code !== "EEXIST") {
+      throw error;
+    }
+  }
+  const token = (await fs.readFile(tokenPath, "utf8")).trim();
+  if (!token) {
+    throw new Error(`Codex app-server token file is empty: ${tokenPath}`);
+  }
+  await fs.chmod(tokenPath, 0o600);
+  return tokenPath;
+}
+
+export async function readCodexAppServerToken(tokenPath) {
+  if (!tokenPath) {
+    throw new Error("Codex backend has no authentication token path");
+  }
+  const token = (await fs.readFile(tokenPath, "utf8")).trim();
+  if (!token) {
+    throw new Error(`Codex app-server token file is empty: ${tokenPath}`);
+  }
+  return token;
+}
+
 export async function startWorkspaceContainer({ bindHost, challenge, challengeDir, log = () => {} }) {
   const name = backendContainerName(challenge, "opencode");
   const runtimeChallengeDir = await ensureBackendChallengeCopy(challenge, challengeDir, "opencode");
+  const opencodeDataDir = path.join(backendWorkspaceRoot(challenge, "opencode"), "opencode-data");
+  await ensureDir(opencodeDataDir);
   let inspected = await inspectContainer(name);
+  await migrateOpenCodeData(inspected, name, opencodeDataDir, log);
+  inspected = await ensureExpectedImage(inspected, name, WORK_IMAGE, log);
   inspected = await ensureExpectedMounts(inspected, name, [
     { destination: CONTAINER_CHALLENGE_DIR, source: runtimeChallengeDir },
     { destination: CONTAINER_OPENCODE_AGENT_DIR, source: RUNTIME_AGENT_DIR },
     { destination: CONTAINER_OPENCODE_MANAGED_CONFIG_DIR, source: RUNTIME_OPENCODE_MANAGED_CONFIG_DIR },
+    { destination: CONTAINER_OPENCODE_DATA_DIR, source: opencodeDataDir },
   ], log);
   if (inspected && !containerRunning(inspected)) {
     log(`starting existing container ${name}`);
@@ -294,6 +451,7 @@ export async function startWorkspaceContainer({ bindHost, challenge, challengeDi
       runtimeChallengeDir,
       agentDir: RUNTIME_AGENT_DIR,
       managedConfigDir: RUNTIME_OPENCODE_MANAGED_CONFIG_DIR,
+      opencodeDataDir,
       opencodeConfigFile,
       opencodeAuthFile: await pathExists(OPENCODE_AUTH_FILE) ? OPENCODE_AUTH_FILE : null,
       includeOpenCodeConfigContent: Boolean(process.env.OPENCODE_CONFIG_CONTENT),
@@ -309,6 +467,7 @@ export async function startWorkspaceContainer({ bindHost, challenge, challengeDi
   return {
     backend: "opencode",
     challengeDir: runtimeChallengeDir,
+    dataDir: opencodeDataDir,
     containerName: name,
     hostPort: port,
     status: "running",
@@ -319,9 +478,20 @@ export async function startCodexWorkspaceContainer({ bindHost, challenge, challe
   const name = backendContainerName(challenge, "codex");
   const runtimeChallengeDir = await ensureBackendChallengeCopy(challenge, challengeDir, "codex");
   await ensureCodexChallengeAgentsFile(runtimeChallengeDir);
+  if (!await pathExists(CODEX_CONFIG_FILE)) {
+    throw new Error(`Missing Codex config file: ${CODEX_CONFIG_FILE}`);
+  }
+  if (!await pathExists(CODEX_ENV_FILE)) {
+    throw new Error(`Missing Codex env file: ${CODEX_ENV_FILE}`);
+  }
+  const codexHomeDir = path.join(backendWorkspaceRoot(challenge, "codex"), "codex-home");
+  const authTokenPath = await ensureCodexAppServerToken(codexHomeDir);
   let inspected = await inspectContainer(name);
+  inspected = await ensureExpectedImage(inspected, name, CODEX_IMAGE, log);
   inspected = await ensureExpectedMounts(inspected, name, [
     { destination: CONTAINER_CHALLENGE_DIR, source: runtimeChallengeDir },
+    { destination: CONTAINER_CODEX_HOME_DIR, source: codexHomeDir },
+    { destination: `${CONTAINER_CODEX_HOME_DIR}/config.toml`, source: CODEX_CONFIG_FILE },
   ], log);
   inspected = await ensureMountsAbsent(inspected, name, [
     `${CONTAINER_CHALLENGE_DIR}/AGENTS.md`,
@@ -332,37 +502,12 @@ export async function startCodexWorkspaceContainer({ bindHost, challenge, challe
     inspected = await inspectContainer(name);
   }
   if (!inspected) {
-    if (!await pathExists(CODEX_CONFIG_FILE)) {
-      throw new Error(`Missing Codex config file: ${CODEX_CONFIG_FILE}`);
-    }
-    if (!await pathExists(CODEX_ENV_FILE)) {
-      throw new Error(`Missing Codex env file: ${CODEX_ENV_FILE}`);
-    }
-    const codexHomeDir = path.join(backendWorkspaceRoot(challenge, "codex"), "codex-home");
-    await ensureDir(codexHomeDir);
-    const args = [
-      "run",
-      "-d",
-      "--name",
-      name,
-      "--privileged",
-      "--cap-add=SYS_PTRACE",
-      "--security-opt",
-      "seccomp=unconfined",
-      "--add-host",
-      "host.docker.internal:host-gateway",
-      "-p",
-      `${bindHost}::${CODEX_PORT}`,
-      "--env-file",
-      path.resolve(CODEX_ENV_FILE),
-      "-v",
-      `${path.resolve(runtimeChallengeDir)}:${CONTAINER_CHALLENGE_DIR}`,
-      "-v",
-      `${path.resolve(codexHomeDir)}:/root/.codex`,
-      "-v",
-      `${path.resolve(CODEX_CONFIG_FILE)}:/root/.codex/config.toml:ro`,
-      CODEX_IMAGE,
-    ];
+    const args = buildCodexDockerArgs({
+      bindHost,
+      containerName: name,
+      runtimeChallengeDir,
+      codexHomeDir,
+    });
     log(`creating container ${name}`);
     await runDocker(args);
     inspected = await inspectContainer(name);
@@ -376,6 +521,7 @@ export async function startCodexWorkspaceContainer({ bindHost, challenge, challe
     challengeDir: runtimeChallengeDir,
     containerName: name,
     hostPort: port,
+    authTokenPath,
     status: "running",
   };
 }

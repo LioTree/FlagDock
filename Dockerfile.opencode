@@ -1,6 +1,7 @@
 ARG BASE_IMAGE=flagdock-sandbox-base:latest
 FROM ${BASE_IMAGE}
 
+ARG OPENCODE_VERSION=1.18.15
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TERM=xterm
 
@@ -13,7 +14,7 @@ RUN apt-get update \
        > /etc/apt/sources.list.d/nodesource.list \
     && apt-get update \
     && apt-get install -y nodejs \
-    && npm install -g opencode-ai@1.14.31 \
+    && npm install -g opencode-ai@${OPENCODE_VERSION} \
     && mkdir -p /root/.config/opencode /root/.local/share/opencode /root/.opencode/agent /challenge \
     && rm -rf /var/lib/apt/lists/*
 

@@ -1,5 +1,9 @@
-import { CODEX_PORT, DEFAULT_MANAGER_HOST } from "../../../constants.js";
-import { runDocker, startCodexWorkspaceContainer } from "../../../docker.js";
+import {
+  CODEX_PORT,
+  CONTAINER_CODEX_APP_SERVER_TOKEN_FILE,
+  DEFAULT_MANAGER_HOST,
+} from "../../../constants.js";
+import { readCodexAppServerToken, runDocker, startCodexWorkspaceContainer } from "../../../docker.js";
 import { nowIso } from "../../../util.js";
 import { beginAutoPromptTurn, finishAutoPromptTurn } from "../auto-prompt.js";
 import { ensurePrimarySession, managedSessionFields } from "../session-registry.js";
@@ -30,16 +34,33 @@ async function client(context, backendState) {
   if (!backendState?.wsUrl) {
     throw new Error("Codex backend has no WebSocket URL");
   }
+  const authToken = await readCodexAppServerToken(backendState.authTokenPath);
   const cache = clientCache(context);
   const cached = cache.get(backendState.wsUrl);
-  if (cached) {
+  if (cached?.authToken === authToken) {
     await cached.connect();
     return cached;
   }
-  const created = new CodexAppClient(backendState.wsUrl);
+  cached?.dispose();
+  const created = new CodexAppClient(backendState.wsUrl, authToken);
   await created.connect();
   cache.set(backendState.wsUrl, created);
   return created;
+}
+
+export function codexTuiCommand(threadID) {
+  const tokenFile = shellQuote(CONTAINER_CODEX_APP_SERVER_TOKEN_FILE);
+  return [
+    `CODEX_REMOTE_AUTH_TOKEN="$(cat ${tokenFile})"`,
+    "exec codex",
+    "--remote",
+    shellQuote(codexContainerWsUrl()),
+    "--remote-auth-token-env",
+    "CODEX_REMOTE_AUTH_TOKEN",
+    "resume",
+    shellQuote(threadID),
+    "--no-alt-screen",
+  ].join(" ");
 }
 
 function registerSession(workspaceRuntime, workspace, thread, { role, mode }) {
@@ -191,7 +212,7 @@ export const codexBackend = {
       throw new Error(`Codex workspace ${workspace.challenge} is not running`);
     }
     const target = attachTarget(workspaceRuntime, workspace, session);
-    const command = `codex --remote ${codexContainerWsUrl()} resume ${session.thread_id} --no-alt-screen`;
+    const command = codexTuiCommand(session.thread_id);
     const hasSession = await runDocker(["exec", backendState.containerName, "tmux", "has-session", "-t", target.tmux_session])
       .then(() => true)
       .catch(() => false);

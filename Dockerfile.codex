@@ -8,6 +8,8 @@ ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 ENV LC_CTYPE=C.UTF-8
 
+ARG CODEX_VERSION=0.147.0
+
 RUN apt-get update \
     && apt-get install -y curl ca-certificates gnupg tmux bubblewrap \
     && mkdir -p /etc/apt/keyrings \
@@ -17,11 +19,11 @@ RUN apt-get update \
        > /etc/apt/sources.list.d/nodesource.list \
     && apt-get update \
     && apt-get install -y nodejs \
-    && npm install -g @openai/codex \
+    && npm install -g @openai/codex@${CODEX_VERSION} \
     && mkdir -p /root/.codex /challenge \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /challenge
 EXPOSE 4097
 
-CMD ["codex", "app-server", "--listen", "ws://0.0.0.0:4097"]
+CMD ["codex", "app-server", "--listen", "ws://0.0.0.0:4097", "--ws-auth", "capability-token", "--ws-token-file", "/root/.codex/app-server.token"]

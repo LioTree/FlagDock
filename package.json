@@ -18,6 +18,13 @@
   "license": "ISC",
   "dependencies": {
     "@liontree/opencode-agent-sdk": "^0.2.0",
+    "ws": "^8.21.1",
     "yaml": "^2.8.3"
+  },
+  "overrides": {
+    "@liontree/opencode-agent-sdk": {
+      "@opencode-ai/sdk": "1.18.15",
+      "opencode-ai": "1.18.15"
+    }
   }
 }
